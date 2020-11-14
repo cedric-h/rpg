@@ -12,8 +12,8 @@ pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
-pub fn inv_lerp(a: f32, b: f32, t: f32) -> f32 {
-    (t - a) / (b - t)
+pub fn inv_lerp(a: f32, b: f32, v: f32) -> f32 {
+    (v - a) / (b - a)
 }
 
 pub fn remap(from0: f32, to0: f32, from1: f32, to1: f32, t: f32) -> f32 {

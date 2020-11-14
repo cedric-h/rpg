@@ -214,11 +214,31 @@ struct EquippedWeapon(hecs::Entity);
 #[derive(Debug, Clone, Copy, Default)]
 struct WeaponState {
     last_rot: Rot,
+    attack: Attack,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Attack {
+    Ready,
+    Swing(SwingState),
+    Cooldown { end_tick: u32 },
+}
+impl Default for Attack {
+    fn default() -> Self {
+        Attack::Ready
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SwingState {
+    start_tick: u32,
+    end_tick: u32,
+    target: Vec2,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct WeaponInput {
-    attacking: bool,
+    start_attacking: bool,
     tick: u32,
     wielder_vel: Vec2,
     wielder_pos: Vec2,
@@ -238,10 +258,10 @@ impl Weapon<'_> {
             *o = self.wep.last_rot.unapply(*o);
         }
 
-        if input.attacking {
-            self.aim(input.wielder_pos, input.target)
-        } else {
-            self.face(input.wielder_pos, input.wielder_vel, input.tick)
+        if !self.aim(input) {
+            let (rot, pos) = self.rest(input);
+            *self.rot = rot;
+            *self.pos = pos;
         }
 
         self.wep.last_rot = *self.rot;
@@ -250,24 +270,101 @@ impl Weapon<'_> {
         }
     }
 
-    fn face(&mut self, wielder: Vec2, wielder_vel: Vec2, tick: u32) {
+    fn rest(
+        &mut self,
+        WeaponInput { wielder_pos, wielder_vel, tick, .. }: WeaponInput,
+    ) -> (Rot, Vec2) {
         let dir = wielder_vel.x().signum();
         let vl = wielder_vel.length();
         let drag = vl.min(0.07);
         let breathe = (tick as f32 / 35.0).sin() / 30.0;
         let jog = (tick as f32 / 6.85).sin() * vl.min(0.175);
-        *self.rot = Rot((FRAC_PI_2 + breathe + jog) * -dir);
-        *self.pos = wielder + vec2(
-            0.55 * -dir + breathe / 3.2 + jog * 1.5 * -dir + drag * -dir,
-            0.35 + (breathe + jog) / 2.8 + drag * 0.5
-        );
+        (
+            Rot((FRAC_PI_2 + breathe + jog) * -dir),
+            wielder_pos
+                + vec2(
+                    0.55 * -dir + breathe / 3.2 + jog * 1.5 * -dir + drag * -dir,
+                    0.35 + (breathe + jog) / 2.8 + drag * 0.5,
+                ),
+        )
     }
 
-    fn aim(&mut self, wielder: Vec2, target: Vec2) {
-        let center = wielder + vec2(0.0, 0.5);
-        let normal = (target - center).normalize();
-        *self.pos = center + normal / 2.0;
-        *self.rot = Rot(math::vec_to_angle(normal) - FRAC_PI_2);
+    fn aim(&mut self, input: WeaponInput) -> bool {
+        let WeaponInput { start_attacking, target, tick, .. } = input;
+
+        use Attack::*;
+        self.wep.attack = match self.wep.attack {
+            Ready if start_attacking => Swing(SwingState {
+                start_tick: tick,
+                end_tick: tick + 34,
+                target,
+            }),
+            Swing(SwingState { end_tick, .. }) if end_tick < tick => {
+                Cooldown { end_tick: tick + 10 }
+            }
+            Cooldown { end_tick, .. } if end_tick < tick => Ready,
+            other => other,
+        };
+
+        if let Swing(state) = self.wep.attack {
+            self.swing(input, state);
+        }
+
+        !matches!(self.wep.attack, Ready | Cooldown { .. })
+    }
+
+    fn center(&mut self, wielder_pos: Vec2) -> Vec2 {
+        wielder_pos + vec2(0.0, 0.5)
+    }
+
+    fn from_center(&mut self, wielder_pos: Vec2, to: Vec2) -> Vec2 {
+        (to - self.center(wielder_pos)).normalize()
+    }
+
+    fn swing(
+        &mut self,
+        input: WeaponInput,
+        SwingState { start_tick, end_tick, target, .. }: SwingState,
+    ) {
+        let WeaponInput { wielder_pos, tick, .. } = input;
+        let (start_rot, start_pos) = self.rest(input);
+
+        let center = self.center(wielder_pos);
+        let normal = self.from_center(wielder_pos, target);
+        let rot = math::vec_to_angle(normal) - FRAC_PI_2;
+        let dir = -normal.x().signum();
+
+        const SWING_WIDTH: f32 = 2.0;
+        let swing = SWING_WIDTH / 4.0 * dir;
+        let frames = [
+            ( 1.50, rot - swing * 1.0, Some(center + normal / 2.0) ), // ready   
+            ( 2.15, rot - swing * 2.0, None                        ), // back up 
+            ( 1.00, rot + swing * 2.0, None                        ), // swing   
+            ( 1.95, rot + swing * 3.0, None                        ), // recovery
+            ( 1.50, start_rot.0      , Some(start_pos)             ), // return  
+        ];
+
+        let (st, et, t) = (start_tick as f32, end_tick as f32, tick as f32);
+        let dt = et - st;
+        let total = frames.iter().map(|&(t, ..)| t).sum::<f32>();
+
+        let mut last_tick = st;
+        let mut last_rot = start_rot.vec2();
+        let mut last_pos = start_pos;
+        for &(duration, angle_rot, pos) in &frames {
+            let tick = last_tick + dt * (duration / total);
+            let prog = math::inv_lerp(last_tick, tick, t).min(1.0).max(0.0);
+            let rot = Rot(angle_rot).vec2();
+            if prog > 0.0 {
+                self.rot.set_vec2(math::slerp(last_rot, rot, prog));
+                if let Some(p) = pos {
+                    *self.pos = last_pos.lerp(p, prog);
+                    last_pos = p;
+                }
+            }
+            last_tick = tick;
+            last_rot = rot;
+        }
     }
 }
 
@@ -297,6 +394,11 @@ impl Hero<'_> {
         if move_vec.length_squared() > 0.0 {
             self.vel.0 += move_vec * 0.0075;
         }
+
+        if is_mouse_button_down(MouseButton::Left) {
+            *self.vel.0.x_mut() =
+                self.vel.0.x().abs() * (mouse_position().0 - screen_width() / 2.0).signum();
+        }
     }
 }
 
@@ -310,7 +412,7 @@ enum Art {
 impl Art {
     fn z_offset(self) -> f32 {
         match self {
-            Art::Sword => -1.0,
+            Art::Sword => -0.5,
             _ => 0.0,
         }
     }
@@ -343,12 +445,7 @@ async fn main() {
         EquippedWeapon(wep),
     ));
 
-    ecs.spawn((
-        Vec2::unit_x() * -4.0,
-        Phys::wings(0.3, 0.21, CircleKind::Push),
-        Art::Npc,
-        Fixed,
-    ));
+    ecs.spawn((Vec2::unit_x() * -4.0, Phys::wings(0.3, 0.21, CircleKind::Push), Art::Npc, Fixed));
 
     ecs.spawn((
         Vec2::unit_x() * 4.0,
@@ -375,7 +472,7 @@ async fn main() {
                 Ok(mut hero) => {
                     hero.movement();
                     (*hero.pos, hero.wep.0, hero.vel.0)
-                },
+                }
                 Err(e) => {
                     error!("no hero!? {}", e);
                     continue;
@@ -385,7 +482,7 @@ async fn main() {
 
             if let Ok(mut wep) = ecs.query_one_mut::<Weapon>(hero_wep) {
                 wep.tick(WeaponInput {
-                    attacking: is_mouse_button_down(MouseButton::Left),
+                    start_attacking: is_mouse_button_down(MouseButton::Left),
                     target: drawer.cam.screen_to_world(mouse_position().into()),
                     wielder_pos: hero_pos,
                     wielder_vel: hero_vel,
@@ -472,41 +569,45 @@ impl Drawer {
                 Art::Target => (RED, 0.8, 0.8),
                 Art::Npc => (GREEN, 1.0, GOLDEN_RATIO),
                 Art::Sword => {
-                    gl.push_model_matrix(glam::Mat4::from_translation(glam::vec3(pos.x(), pos.y(), 0.0)));
+                    gl.push_model_matrix(glam::Mat4::from_translation(glam::vec3(
+                        pos.x(),
+                        pos.y(),
+                        0.0,
+                    )));
                     if let Some(Rot(r)) = rot {
                         gl.push_model_matrix(glam::Mat4::from_rotation_z(r));
                     }
 
                     draw_triangle(
-                        vec2( 0.075, 0.0),
+                        vec2(0.075, 0.0),
                         vec2(-0.075, 0.0),
                         vec2(0.00, GOLDEN_RATIO),
-                        BROWN
+                        BROWN,
                     );
                     for &dir in &[-1.0, 1.0] {
                         draw_triangle(
                             vec2(0.00, GOLDEN_RATIO),
                             vec2(dir * 0.1, 0.35),
                             vec2(0.20 * dir, 1.35),
-                            GRAY
+                            GRAY,
                         )
                     }
                     draw_triangle(
                         vec2(-0.1, 0.35),
-                        vec2( 0.1, 0.35),
+                        vec2(0.1, 0.35),
                         vec2(0.00, GOLDEN_RATIO),
                         GRAY,
                     );
 
                     let (x, y) = vec2(-0.225, 0.400).into();
-                    let (w, z) = vec2( 0.225, 0.400).into();
+                    let (w, z) = vec2(0.225, 0.400).into();
                     draw_line(x, y, w, z, 0.135, DARKGRAY);
                     if rot.is_some() {
                         gl.pop_model_matrix();
                     }
                     gl.pop_model_matrix();
-                    continue
-                },
+                    continue;
+                }
             };
             let (x, y) = pos.into();
             draw_rectangle(x - w / 2.0, y, w, h, color);
