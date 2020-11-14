@@ -8,7 +8,7 @@ use std::f32::consts::FRAC_PI_2;
 macro_rules! or_err {
     ( $r:expr ) => {
         if let Err(e) = $r {
-            error!("{}", e)
+            error!("[{} {}:{}]: {}", file!(), line!(), column!(), e)
         }
     };
     ( $l:literal, $r:expr ) => {
@@ -86,9 +86,9 @@ impl Phys {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Contacts(smallvec::SmallVec<[Hit; 5]>);
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Hit {
     normal: Vec2,
     depth: f32,
@@ -136,6 +136,7 @@ struct Physics {
     circles: Vec<(hecs::Entity, Vec2, Phys)>,
     collisions: Vec<(hecs::Entity, Hit)>,
     hit_ents: fxhash::FxHashSet<hecs::Entity>,
+    stale_hit_ents: Vec<hecs::Entity>,
 }
 impl Physics {
     fn new() -> Self {
@@ -144,11 +145,12 @@ impl Physics {
             circles: Vec::with_capacity(1000),
             collisions: Vec::with_capacity(200),
             hit_ents: HashSet::with_capacity_and_hasher(100, FxBuildHasher::default()),
+            stale_hit_ents: Vec::with_capacity(100),
         }
     }
 
     fn tick(&mut self, ecs: &mut hecs::World) {
-        let Self { circles, collisions, hit_ents } = self;
+        let Self { circles, collisions, hit_ents, stale_hit_ents } = self;
 
         system!(ecs, _,
             pos           = &mut Vec2
@@ -188,10 +190,16 @@ impl Physics {
         }
 
         for &ent in &*hit_ents {
-            or_err!(ecs.insert_one(
+            if let Err(hecs::NoSuchEntity) = ecs.insert_one(
                 ent,
                 Contacts(collisions.drain_filter(|(e, _)| *e == ent).map(|(_, h)| h).collect()),
-            ));
+            ) {
+                stale_hit_ents.push(ent);
+            }
+        }
+
+        for ent in stale_hit_ents.drain(..) {
+            hit_ents.remove(&ent);
         }
 
         system!(ecs, _,
@@ -211,10 +219,11 @@ impl Physics {
 #[derive(Debug, Clone, Copy)]
 struct EquippedWeapon(hecs::Entity);
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct WeaponState {
     last_rot: Rot,
     attack: Attack,
+    ents_hit: smallvec::SmallVec<[hecs::Entity; 5]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -231,6 +240,7 @@ impl Default for Attack {
 
 #[derive(Debug, Clone, Copy)]
 struct SwingState {
+    doing_damage: bool,
     start_tick: u32,
     end_tick: u32,
     target: Vec2,
@@ -251,6 +261,7 @@ struct Weapon<'a> {
     rot: &'a mut Rot,
     wep: &'a mut WeaponState,
     phy: &'a mut Phys,
+    contacts: &'a Contacts,
 }
 impl Weapon<'_> {
     fn tick(&mut self, input: WeaponInput) {
@@ -258,7 +269,13 @@ impl Weapon<'_> {
             *o = self.wep.last_rot.unapply(*o);
         }
 
-        if !self.aim(input) {
+        if self.aim(input) {
+            let mut atk = std::mem::take(&mut self.wep.attack);
+            if let Attack::Swing(state) = &mut atk {
+                state.doing_damage = self.swing(input, *state);
+            }
+            self.wep.attack = atk;
+        } else {
             let (rot, pos) = self.rest(input);
             *self.rot = rot;
             *self.pos = pos;
@@ -267,6 +284,28 @@ impl Weapon<'_> {
         self.wep.last_rot = *self.rot;
         for Circle(_, o, _) in self.phy.0.iter_mut() {
             *o = self.rot.apply(*o);
+        }
+    }
+
+    fn damage_ents(&mut self) -> smallvec::SmallVec<[hecs::Entity; 5]> {
+        match self.wep.attack {
+            Attack::Swing(s) if s.doing_damage => {
+                self
+                    .contacts
+                    .0
+                    .iter()
+                    .map(|h| h.hit)
+                    .filter(|e| {
+                        if self.wep.ents_hit.contains(e) {
+                            false
+                        } else {
+                            self.wep.ents_hit.push(*e);
+                            true
+                        }
+                    })
+                    .collect()
+            },
+            _ => Default::default(),
         }
     }
 
@@ -294,21 +333,22 @@ impl Weapon<'_> {
 
         use Attack::*;
         self.wep.attack = match self.wep.attack {
-            Ready if start_attacking => Swing(SwingState {
-                start_tick: tick,
-                end_tick: tick + 34,
-                target,
-            }),
+            Ready if start_attacking => {
+                self.wep.ents_hit.clear();
+                Swing(SwingState {
+                    start_tick: tick,
+                    end_tick: tick + 50,
+                    target,
+                    doing_damage: false,
+                })
+            },
             Swing(SwingState { end_tick, .. }) if end_tick < tick => {
+                self.wep.ents_hit.clear();
                 Cooldown { end_tick: tick + 10 }
             }
             Cooldown { end_tick, .. } if end_tick < tick => Ready,
             other => other,
         };
-
-        if let Swing(state) = self.wep.attack {
-            self.swing(input, state);
-        }
 
         !matches!(self.wep.attack, Ready | Cooldown { .. })
     }
@@ -325,7 +365,7 @@ impl Weapon<'_> {
         &mut self,
         input: WeaponInput,
         SwingState { start_tick, end_tick, target, .. }: SwingState,
-    ) {
+    ) -> bool {
         let WeaponInput { wielder_pos, tick, .. } = input;
         let (start_rot, start_pos) = self.rest(input);
 
@@ -336,12 +376,14 @@ impl Weapon<'_> {
 
         const SWING_WIDTH: f32 = 2.0;
         let swing = SWING_WIDTH / 4.0 * dir;
+        let hand_pos = center + normal / 2.0;
+        #[rustfmt::skip]
         let frames = [
-            ( 1.50, rot - swing * 1.0, Some(center + normal / 2.0) ), // ready   
-            ( 2.15, rot - swing * 2.0, None                        ), // back up 
-            ( 1.00, rot + swing * 2.0, None                        ), // swing   
-            ( 1.95, rot + swing * 3.0, None                        ), // recovery
-            ( 1.50, start_rot.0      , Some(start_pos)             ), // return  
+            ( 2.50, rot - swing * 1.0, Some(hand_pos) , false ), // ready   
+            ( 2.65, rot - swing * 2.0, None           , false ), // back up 
+            ( 1.00, rot + swing * 2.0, None           , true  ), // swing   
+            ( 2.85, rot + swing * 3.0, None           , false ), // recovery
+            ( 2.50, start_rot.0      , Some(start_pos), false ), // return  
         ];
 
         let (st, et, t) = (start_tick as f32, end_tick as f32, tick as f32);
@@ -351,20 +393,29 @@ impl Weapon<'_> {
         let mut last_tick = st;
         let mut last_rot = start_rot.vec2();
         let mut last_pos = start_pos;
-        for &(duration, angle_rot, pos) in &frames {
+        let mut do_damage = false;
+        for &(duration, angle_rot, pos, damage) in &frames {
             let tick = last_tick + dt * (duration / total);
-            let prog = math::inv_lerp(last_tick, tick, t).min(1.0).max(0.0);
             let rot = Rot(angle_rot).vec2();
+            let prog = math::inv_lerp(last_tick, tick, t).min(1.0).max(0.0);
+
             if prog > 0.0 {
+                if prog < 1.0 {
+                    do_damage = do_damage || damage;
+                }
+
                 self.rot.set_vec2(math::slerp(last_rot, rot, prog));
                 if let Some(p) = pos {
                     *self.pos = last_pos.lerp(p, prog);
                     last_pos = p;
                 }
             }
-            last_tick = tick;
+
             last_rot = rot;
+            last_tick = tick;
         }
+
+        do_damage
     }
 }
 
@@ -418,9 +469,13 @@ impl Art {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
+struct Health(u32);
+
 #[macroquad::main("rpg")]
 async fn main() {
     let mut ecs = hecs::World::new();
+    let mut damage_labels = DamageLabelBin::new();
     let mut drawer = Drawer::new();
     let mut physics = Physics::new();
     let mut fps = Fps::new();
@@ -435,21 +490,31 @@ async fn main() {
         ]),
         Rot(0.0),
         WeaponState::default(),
+        Contacts::default(),
         Art::Sword,
     ));
     let hero = ecs.spawn((
         Vec2::unit_y() * -5.0,
         Velocity(Vec2::zero()),
         Phys::wings(0.3, 0.21, CircleKind::Push),
+        Contacts::default(),
         Art::Hero,
         EquippedWeapon(wep),
     ));
 
-    ecs.spawn((Vec2::unit_x() * -4.0, Phys::wings(0.3, 0.21, CircleKind::Push), Art::Npc, Fixed));
+    ecs.spawn((
+        Vec2::unit_x() * -4.0,
+        Phys::wings(0.3, 0.21, CircleKind::Push),
+        Contacts::default(),
+        Art::Npc,
+        Fixed
+    ));
 
     ecs.spawn((
         Vec2::unit_x() * 4.0,
         Phys::new(&[Circle::push(0.3, vec2(0.0, 0.1)), Circle::hit(0.4, vec2(0.0, 0.4))]),
+        Health(5),
+        Contacts::default(),
         Art::Target,
         Fixed,
     ));
@@ -480,20 +545,41 @@ async fn main() {
             };
             drawer.pan_cam_to = hero_pos;
 
-            if let Ok(mut wep) = ecs.query_one_mut::<Weapon>(hero_wep) {
-                wep.tick(WeaponInput {
-                    start_attacking: is_mouse_button_down(MouseButton::Left),
-                    target: drawer.cam.screen_to_world(mouse_position().into()),
-                    wielder_pos: hero_pos,
-                    wielder_vel: hero_vel,
-                    tick,
-                });
+            let hero_damaged = ecs
+                .query_one_mut::<Weapon>(hero_wep)
+                .ok()
+                .map(|mut wep| {
+                    wep.tick(WeaponInput {
+                        start_attacking: is_mouse_button_down(MouseButton::Left),
+                        target: drawer.cam.screen_to_world(mouse_position().into()),
+                        wielder_pos: hero_pos,
+                        wielder_vel: hero_vel,
+                        tick,
+                    });
+                    wep.damage_ents()
+                })
+                .unwrap_or_default();
+
+            for &hit in &hero_damaged {
+                if let Ok(Health(hp)) = ecs.get_mut(hit).as_deref_mut() {
+                    *hp -= 1;
+                    damage_labels.push(DamageLabel {
+                        tick,
+                        hp: -1,
+                        pos: hero_pos,
+                    });
+                    if *hp > 0 {
+                        continue
+                    }
+                }
+                or_err!(ecs.despawn(hit));
             }
         }
 
         drawer.draw(&ecs);
+        damage_labels.draw(tick, &drawer.cam);
         fps.update();
-        fps.render();
+        fps.draw();
 
         next_frame().await
     }
@@ -521,8 +607,46 @@ impl Fps {
         self.fps.iter().map(|i| *i as f32).sum::<f32>() / 100.0
     }
 
-    fn render(&self) {
+    fn draw(&self) {
         draw_text(&self.average().to_string(), 0.0, 0.0, 30.0, BLACK);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DamageLabel {
+    pos: Vec2,
+    hp: i32,
+    tick: u32
+}
+
+struct DamageLabelBin {
+    labels: Vec<DamageLabel>,
+    text: String,
+}
+impl DamageLabelBin {
+    fn new() -> Self {
+        Self {
+            labels: Vec::with_capacity(1000),
+            text: String::with_capacity(100),
+        }
+    }
+
+    fn push(&mut self, label: DamageLabel) {
+        self.labels.push(label);
+    }
+
+    fn draw(&mut self, tick: u32, cam: &Camera2D) {
+        let Self { labels, text, .. } = self;
+
+        labels.drain_filter(|l| {
+            let end_tick = l.tick + 60;
+
+            *text = l.hp.to_string();
+            let (x, y) = cam.world_to_screen(l.pos).into();
+            draw_text(text, x, y + (end_tick - tick) as f32, 20.0, BLUE);
+
+            tick > end_tick
+        });
     }
 }
 
