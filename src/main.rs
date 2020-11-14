@@ -519,16 +519,15 @@ async fn main() {
         Fixed,
     ));
 
-    use std::time::{Duration, Instant};
-    let step_every = Duration::from_secs_f64(1.0 / 60.0);
-    let mut time = step_every;
-    let mut step = Instant::now();
+    const STEP_EVERY: f64 = 1.0 / 60.0;
+    let mut time = STEP_EVERY;
+    let mut step = get_time();
     let mut tick: u32 = 0;
     loop {
-        time += step.elapsed();
-        step = Instant::now();
-        while time >= step_every {
-            time -= step_every;
+        time += get_time() - step;
+        step = get_time();
+        while time >= STEP_EVERY {
+            time -= STEP_EVERY;
             tick = tick.wrapping_add(1);
 
             physics.tick(&mut ecs);
@@ -643,7 +642,7 @@ impl DamageLabelBin {
 
             *text = l.hp.to_string();
             let (x, y) = cam.world_to_screen(l.pos).into();
-            draw_text(text, x, y + (end_tick - tick) as f32, 20.0, BLUE);
+            draw_text(text, x, y - (end_tick - tick) as f32, 20.0, BLUE);
 
             tick > end_tick
         });
