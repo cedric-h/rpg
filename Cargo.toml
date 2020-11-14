@@ -1,0 +1,16 @@
+[package]
+name = "rpg"
+version = "0.1.0"
+authors = ["Cedric Hutchings <cedhut02@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+show-collide = []
+
+[dependencies]
+hecs = { git = "https://github.com/Ralith/hecs", features = [ "macros" ] }
+macroquad = { git = "https://github.com/not-fl3/macroquad", features = ["log-impl"] }
+smallvec = "1.4.2"
+fxhash = "0.2.1"
