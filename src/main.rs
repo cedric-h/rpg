@@ -287,7 +287,7 @@ impl Weapon<'_> {
         }
     }
 
-    fn damage_ents(&mut self) -> smallvec::SmallVec<[hecs::Entity; 5]> {
+    fn ent_hits(&mut self) -> smallvec::SmallVec<[hecs::Entity; 5]> {
         match self.wep.attack {
             Attack::Swing(s) if s.doing_damage => {
                 self
@@ -544,7 +544,7 @@ async fn main() {
             };
             drawer.pan_cam_to = hero_pos;
 
-            let hero_damaged = ecs
+            let hero_attacks = ecs
                 .query_one_mut::<Weapon>(hero_wep)
                 .ok()
                 .map(|mut wep| {
@@ -555,17 +555,17 @@ async fn main() {
                         wielder_vel: hero_vel,
                         tick,
                     });
-                    wep.damage_ents()
+                    wep.ent_hits()
                 })
                 .unwrap_or_default();
 
-            for &hit in &hero_damaged {
-                if let Ok(Health(hp)) = ecs.get_mut(hit).as_deref_mut() {
+            for &hit in &hero_attacks {
+                if let Ok((Health(hp), &pos)) = ecs.query_one_mut::<(&mut _, &_)>(hit) {
                     *hp -= 1;
                     damage_labels.push(DamageLabel {
                         tick,
                         hp: -1,
-                        pos: hero_pos,
+                        pos,
                     });
                     if *hp > 0 {
                         continue
@@ -642,7 +642,7 @@ impl DamageLabelBin {
 
             *text = l.hp.to_string();
             let (x, y) = cam.world_to_screen(l.pos).into();
-            draw_text(text, x, y - (end_tick - tick) as f32, 20.0, BLUE);
+            draw_text(text, x - 20.0, y - 60.0 - (tick - l.tick) as f32, 42.0, MAROON);
 
             tick > end_tick
         });
