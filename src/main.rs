@@ -106,23 +106,28 @@ struct Fixed;
 struct Rot(f32);
 impl Rot {
     fn vec2(self) -> Vec2 {
-        math::angle_to_vec(self.0)
+        let (y, x) = self.0.sin_cos();
+        vec2(x, y)
+    }
+
+    fn from_vec2(dir: Vec2) -> Self {
+        Self(dir.y().atan2(dir.x()))
     }
 
     fn set_vec2(&mut self, v: Vec2) {
-        self.0 = math::vec_to_angle(v)
+        *self = Self::from_vec2(v);
     }
 
     fn apply(self, v: Vec2) -> Vec2 {
         let len = v.length();
-        let angle = math::vec_to_angle(v);
-        math::angle_to_vec(angle + self.0) * len
+        let angle = Rot::from_vec2(v);
+        Rot(angle.0 + self.0).vec2() * len
     }
 
     fn unapply(self, v: Vec2) -> Vec2 {
         let len = v.length();
-        let angle = math::vec_to_angle(v);
-        math::angle_to_vec(angle - self.0) * len
+        let angle = Rot::from_vec2(v);
+        Rot(angle.0 - self.0).vec2() * len
     }
 }
 
@@ -414,7 +419,7 @@ impl Weapon<'_> {
         let (start_rot, start_pos) = self.rest(input);
 
         let center = self.center(wielder_pos);
-        let rot = math::vec_to_angle(toward) - FRAC_PI_2;
+        let rot = Rot::from_vec2(toward).0 - FRAC_PI_2;
         let dir = -toward.x().signum();
 
         const SWING_WIDTH: f32 = 2.0;
