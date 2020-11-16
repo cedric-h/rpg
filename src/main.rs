@@ -1,5 +1,6 @@
 #![feature(drain_filter)]
 #![feature(array_map)]
+#![feature(result_copied)]
 use macroquad::prelude::*;
 
 #[allow(dead_code)]
@@ -498,7 +499,7 @@ impl Hero<'_> {
 #[derive(Copy, Clone, Debug)]
 enum Art {
     Hero,
-    Target,
+    Scarecrow,
     Npc,
     Sword,
 }
@@ -543,25 +544,40 @@ async fn main() {
         Bag::default(),
     ));
 
-    ecs.spawn((
-        Vec2::unit_x() * -4.0,
-        Phys::wings(0.3, 0.21, CircleKind::Push),
-        Contacts::default(),
-        Art::Npc,
-        Fixed,
-    ));
+    let [_, npc_2] = [vec2(-4.0, 0.0), vec2(5.0, 5.0)].map(|npc_pos| {
+        ecs.spawn((
+            npc_pos,
+            Phys::wings(0.3, 0.21, CircleKind::Push),
+            Contacts::default(),
+            Art::Npc,
+            Fixed,
+        ))
+    });
 
-    let target = ecs.spawn((
+    let scarecrow = ecs.spawn((
         Vec2::unit_x() * 4.0,
         Phys::new(&[Circle::push(0.3, vec2(0.0, 0.1)), Circle::hit(0.4, vec2(0.0, 0.4))]),
         Health(5),
         Contacts::default(),
-        Art::Target,
+        Art::Scarecrow,
         Fixed,
     ));
 
-    let target_quest = quests.add(Quest {
-        title: "Rpg Tropes II",
+    let rpg_tropes_3 = quests.add(Quest {
+        title: "RPG Tropes III",
+        completion_quip: "Save us from impending doom! But first, give this to my girlfriend.",
+        unlock_description: concat!(
+            "I'm happy to say that you've come to the part of your journey where \n",
+            "I must bid you adieu and direct you to another clueless, doddering NPC. \n",
+            "So long adventurer, and thanks for nothing! \n\n",
+            "P.S. Don't forget to save me from certain doom!",
+        ),
+        tasks: vec![Task { label: "Talk to NPC 2", reqs: vec![Req::TalkTo(npc_2)] }],
+        ..Default::default()
+    });
+
+    let rpg_tropes_2 = quests.add(Quest {
+        title: "RPG Tropes II",
         completion_quip: "My wife and children -- who probably don't even exist -- thank you!",
         unlock_description: concat!(
             "I'm going to have to ask you to ruthlessly destroy a scarecrow I \n",
@@ -570,12 +586,13 @@ async fn main() {
             "but it's fine because it's not like I have anything else to do other \n",
             "than stand here pretending to work on another one!",
         ),
-        tasks: vec![Task { label: " Destroy Target", reqs: vec![Req::Destroy(target)] }],
+        tasks: vec![Task { label: "Destroy Scarecrow", reqs: vec![Req::Destroy(scarecrow)] }],
+        unlocks: vec![rpg_tropes_3],
         ..Default::default()
     });
 
     quests.add(Quest {
-        title: "Rpg Tropes Abound!",
+        title: "RPG Tropes Abound!",
         completion_quip: "Try not to poke your eye out, like the last adventurer ...",
         unlock_description: concat!(
             "It's dangerous to go alone! \n",
@@ -584,7 +601,7 @@ async fn main() {
             "to spare us from the horrible fate that will surely befall us regardless \n",
             "of whether or not you spend three hours immersed in a fishing minigame.",
         ),
-        unlocks: vec![target_quest],
+        unlocks: vec![rpg_tropes_2],
         reward_items: vec![Item {
             pos: Vec2::zero(),
             art: Art::Sword,
@@ -614,7 +631,11 @@ async fn main() {
             tick = tick.wrapping_add(1);
 
             physics.tick(&mut ecs);
-            let hero_rewards = quests.update(tick, &mut ecs);
+            let hero_rewards = quests.update(&QuestInput {
+                tick,
+                hero_pos: ecs.query_one_mut::<&Vec2>(hero).as_deref().copied().unwrap_or_default(),
+                ecs: &ecs,
+            });
             keeper_of_bags.keep(&mut ecs);
 
             let (hero_pos, hero_wep, hero_vel) = match ecs.query_one_mut::<Hero>(hero) {
@@ -660,7 +681,11 @@ async fn main() {
         drawer.draw(&ecs);
         damage_labels.draw(tick, &drawer.cam);
 
-        quests.ui(&ecs);
+        quests.ui(&QuestInput {
+            tick,
+            hero_pos: ecs.query_one_mut::<&Vec2>(hero).as_deref().copied().unwrap_or_default(),
+            ecs: &ecs,
+        });
         megaui_macroquad::draw_megaui();
 
         fps.update();
@@ -670,24 +695,32 @@ async fn main() {
     }
 }
 
+struct QuestInput<'a> {
+    ecs: &'a hecs::World,
+    hero_pos: Vec2,
+    tick: u32,
+}
+
 #[derive(Debug, Clone)]
 struct Task {
     label: &'static str,
     reqs: Vec<Req>,
 }
 impl Task {
-    fn done(&self, ecs: &hecs::World) -> bool {
-        self.reqs.iter().all(|r| r.done(ecs))
+    fn done(&self, qi: &QuestInput) -> bool {
+        self.reqs.iter().all(|r| r.done(qi))
     }
 }
 #[derive(Debug, Clone)]
 enum Req {
     Destroy(hecs::Entity),
+    TalkTo(hecs::Entity),
 }
 impl Req {
-    fn done(&self, ecs: &hecs::World) -> bool {
+    fn done(&self, qi: &QuestInput) -> bool {
         match self {
-            &Req::Destroy(e) => !ecs.contains(e),
+            &Req::Destroy(e) => !qi.ecs.contains(e),
+            &Req::TalkTo(e) => qi.ecs.get::<Vec2>(e).map(|p| (*p - qi.hero_pos).length() < 1.0).unwrap_or(false),
         }
     }
 }
@@ -815,14 +848,12 @@ impl Quests {
         i
     }
 
-    fn update(&mut self, tick: u32, ecs: &hecs::World) -> Vec<Item> {
+    fn update(&mut self, qi: &QuestInput) -> Vec<Item> {
         let mut rewards = vec![];
 
         for (_, quest) in self.quests.accepted_mut() {
-            let done = quest.tasks.iter().all(|t| t.done(ecs));
-
-            if done {
-                quest.completion.finish(tick);
+            if quest.tasks.iter().all(|t| t.done(qi)) {
+                quest.completion.finish(qi.tick);
                 self.jump_to_tab = Some(2);
                 self.temp.extend(quest.unlocks.iter().copied());
                 rewards.extend(quest.reward_items.iter().cloned());
@@ -852,7 +883,7 @@ impl Quests {
         }
     }
 
-    fn accepted_ui(&mut self, ui: &mut megaui::Ui, ecs: &hecs::World) {
+    fn accepted_ui(&mut self, ui: &mut megaui::Ui, qi: &QuestInput) {
         use megaui::hash;
 
         ui.separator();
@@ -909,7 +940,7 @@ impl Quests {
         [&self.tab_titles[0], &self.tab_titles[1], &self.tab_titles[2]]
     }
 
-    fn ui(&mut self, ecs: &hecs::World) {
+    fn ui(&mut self, qi: &QuestInput) {
         use megaui_macroquad::{
             draw_window,
             megaui::{
@@ -923,7 +954,7 @@ impl Quests {
         let size = Self::size();
         draw_window(
             hash!(),
-            (vec2(screen_width(), screen_height()) - size) / 2.0,
+            vec2(screen_width(), screen_height()) / 2.0 - size * vec2(0.5, -0.1),
             size,
             WindowParams { label: "Quests".to_string(), ..Default::default() },
             |ui| {
@@ -948,7 +979,7 @@ impl Quests {
                     .position(Vector2::new(0.0, tab_height))
                     .ui(ui, |ui| match tab {
                         0 => self.unlocked_ui(ui),
-                        1 => self.accepted_ui(ui, ecs),
+                        1 => self.accepted_ui(ui, qi),
                         2 => self.finished_ui(ui),
                         _ => unreachable!(),
                     });
@@ -1057,7 +1088,7 @@ impl Drawer {
 
             let (color, w, h) = match art {
                 Art::Hero => (BLUE, 1.0, 1.0),
-                Art::Target => (RED, 0.8, 0.8),
+                Art::Scarecrow => (RED, 0.8, 0.8),
                 Art::Npc => (GREEN, 1.0, GOLDEN_RATIO),
                 Art::Sword => {
                     gl.push_model_matrix(glam::Mat4::from_translation(glam::vec3(
