@@ -288,7 +288,7 @@ struct SwingState {
     doing_damage: bool,
     start_tick: u32,
     end_tick: u32,
-    target: Vec2,
+    toward: Vec2,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -297,6 +297,7 @@ struct WeaponInput {
     tick: u32,
     wielder_vel: Vec2,
     wielder_pos: Vec2,
+    wielder_dir: Direction,
     target: Vec2,
 }
 
@@ -354,9 +355,9 @@ impl Weapon<'_> {
 
     fn rest(
         &mut self,
-        WeaponInput { wielder_pos, wielder_vel, tick, .. }: WeaponInput,
+        WeaponInput { wielder_pos, wielder_vel, wielder_dir, tick, .. }: WeaponInput,
     ) -> (Rot, Vec2) {
-        let dir = wielder_vel.x().signum();
+        let dir = wielder_dir.signum();
         let vl = wielder_vel.length();
         let drag = vl.min(0.07);
         let breathe = (tick as f32 / 35.0).sin() / 30.0;
@@ -372,7 +373,7 @@ impl Weapon<'_> {
     }
 
     fn aim(&mut self, input: WeaponInput) -> bool {
-        let WeaponInput { start_attacking, target, tick, .. } = input;
+        let WeaponInput { wielder_pos, start_attacking, target, tick, .. } = input;
 
         use Attack::*;
         self.wep.attack = match self.wep.attack {
@@ -381,7 +382,7 @@ impl Weapon<'_> {
                 Swing(SwingState {
                     start_tick: tick,
                     end_tick: tick + 50,
-                    target,
+                    toward: self.from_center(wielder_pos, target),
                     doing_damage: false,
                 })
             }
@@ -407,19 +408,18 @@ impl Weapon<'_> {
     fn swing(
         &mut self,
         input: WeaponInput,
-        SwingState { start_tick, end_tick, target, .. }: SwingState,
+        SwingState { start_tick, end_tick, toward, .. }: SwingState,
     ) -> bool {
         let WeaponInput { wielder_pos, tick, .. } = input;
         let (start_rot, start_pos) = self.rest(input);
 
         let center = self.center(wielder_pos);
-        let normal = self.from_center(wielder_pos, target);
-        let rot = math::vec_to_angle(normal) - FRAC_PI_2;
-        let dir = -normal.x().signum();
+        let rot = math::vec_to_angle(toward) - FRAC_PI_2;
+        let dir = -toward.x().signum();
 
         const SWING_WIDTH: f32 = 2.0;
         let swing = SWING_WIDTH / 4.0 * dir;
-        let hand_pos = center + normal / 2.0;
+        let hand_pos = center + toward / 2.0;
         #[rustfmt::skip]
         let frames = [
             ( 2.50, rot - swing * 1.0, Some(hand_pos) , false ), // ready   
@@ -462,11 +462,26 @@ impl Weapon<'_> {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
+enum Direction {
+    Left,
+    Right,
+}
+impl Direction {
+    fn signum(self) -> f32 {
+        match self {
+            Direction::Left => -1.0,
+            Direction::Right => 1.0,
+        }
+    }
+}
+
 #[derive(hecs::Query, Debug)]
 struct Hero<'a> {
     vel: &'a mut Velocity,
     pos: &'a mut Vec2,
     art: &'a Art,
+    dir: &'a mut Direction,
     bag: &'a mut Bag,
 }
 impl Hero<'_> {
@@ -486,12 +501,23 @@ impl Hero<'_> {
             .normalize();
 
         if move_vec.length_squared() > 0.0 {
-            self.vel.0 += move_vec * 0.0075;
+            self.vel.0 += move_vec
+                * if self.bag.weapon.is_none()
+                    || move_vec.x() == 0.0
+                    || move_vec.x().signum() == self.dir.signum()
+                {
+                    0.0075
+                } else {
+                    0.0045
+                };
         }
 
         if !mouse_over_ui() && is_mouse_button_down(MouseButton::Left) {
-            *self.vel.0.x_mut() =
-                self.vel.0.x().abs() * (mouse_position().0 - screen_width() / 2.0).signum();
+            if mouse_position().0 < screen_width() / 2.0 {
+                *self.dir = Direction::Left;
+            } else {
+                *self.dir = Direction::Right;
+            }
         }
     }
 }
@@ -502,6 +528,7 @@ enum Art {
     Scarecrow,
     Npc,
     Sword,
+    Post,
 }
 impl Art {
     fn z_offset(self) -> f32 {
@@ -525,6 +552,11 @@ struct Item {
     contacts: Contacts,
 }
 
+fn circle_points(n: usize, radius: f32) -> impl Iterator<Item = Vec2> {
+    use std::f32::consts::TAU;
+    (0..n).map(move |i| Rot((i as f32 / n as f32) * TAU).vec2() * radius)
+}
+
 #[macroquad::main("rpg")]
 async fn main() {
     let mut ecs = hecs::World::new();
@@ -535,33 +567,38 @@ async fn main() {
     let mut keeper_of_bags = KeeperOfBags::new();
     let mut fps = Fps::new();
 
+    let npc = |npc_pos| (npc_pos, Phys::wings(0.3, 0.21, CircleKind::Push), Art::Npc, Fixed);
+
     let hero = ecs.spawn((
         Vec2::unit_x() * -2.5,
         Velocity(Vec2::zero()),
         Phys::wings(0.3, 0.21, CircleKind::Push),
-        Contacts::default(),
         Art::Hero,
+        Direction::Left,
         Bag::default(),
     ));
 
-    let [_, npc_2] = [vec2(-4.0, 0.0), vec2(5.0, 5.0)].map(|npc_pos| {
-        ecs.spawn((
-            npc_pos,
-            Phys::wings(0.3, 0.21, CircleKind::Push),
-            Contacts::default(),
-            Art::Npc,
-            Fixed,
-        ))
-    });
-
+    ecs.spawn(npc(vec2(-4.0, 0.0)));
     let scarecrow = ecs.spawn((
-        Vec2::unit_x() * 4.0,
+        vec2(3.4, -0.4),
         Phys::new(&[Circle::push(0.3, vec2(0.0, 0.1)), Circle::hit(0.4, vec2(0.0, 0.4))]),
         Health(5),
-        Contacts::default(),
         Art::Scarecrow,
         Fixed,
     ));
+
+    let npc2 = ecs.spawn(npc(vec2(4.0, 11.0)));
+    for (i, post_pos) in circle_points(28, 4.5).enumerate() {
+        if i == 16 / 2 {
+            continue;
+        }
+        ecs.spawn((
+            post_pos + vec2(5.0, 5.0),
+            Art::Post,
+            Phys::new(&[Circle::push(0.4, vec2(0.0, 0.4))]),
+            Fixed,
+        ));
+    }
 
     let rpg_tropes_3 = quests.add(Quest {
         title: "RPG Tropes III",
@@ -572,7 +609,7 @@ async fn main() {
             "So long adventurer, and thanks for nothing! \n\n",
             "P.S. Don't forget to save me from certain doom!",
         ),
-        tasks: vec![Task { label: "Talk to NPC 2", reqs: vec![Req::TalkTo(npc_2)] }],
+        tasks: vec![Task { label: "Talk to NPC 2", reqs: vec![Req::TalkTo(npc2)] }],
         ..Default::default()
     });
 
@@ -638,11 +675,11 @@ async fn main() {
             });
             keeper_of_bags.keep(&mut ecs);
 
-            let (hero_pos, hero_wep, hero_vel) = match ecs.query_one_mut::<Hero>(hero) {
+            let (hero_pos, hero_wep, hero_vel, hero_dir) = match ecs.query_one_mut::<Hero>(hero) {
                 Ok(mut hero) => {
                     hero.bag.take(hero_rewards.into_iter());
                     hero.movement();
-                    (*hero.pos, hero.bag.weapon, hero.vel.0)
+                    (*hero.pos, hero.bag.weapon, hero.vel.0, *hero.dir)
                 }
                 Err(e) => {
                     error!("no hero!? {}", e);
@@ -660,6 +697,7 @@ async fn main() {
                         target: drawer.cam.screen_to_world(mouse_position().into()),
                         wielder_pos: hero_pos,
                         wielder_vel: hero_vel,
+                        wielder_dir: hero_dir,
                         tick,
                     });
                     wep.ent_hits()
@@ -720,7 +758,9 @@ impl Req {
     fn done(&self, qi: &QuestInput) -> bool {
         match self {
             &Req::Destroy(e) => !qi.ecs.contains(e),
-            &Req::TalkTo(e) => qi.ecs.get::<Vec2>(e).map(|p| (*p - qi.hero_pos).length() < 1.0).unwrap_or(false),
+            &Req::TalkTo(e) => {
+                qi.ecs.get::<Vec2>(e).map(|p| (*p - qi.hero_pos).length() < 1.3).unwrap_or(false)
+            }
         }
     }
 }
@@ -1090,6 +1130,7 @@ impl Drawer {
                 Art::Hero => (BLUE, 1.0, 1.0),
                 Art::Scarecrow => (RED, 0.8, 0.8),
                 Art::Npc => (GREEN, 1.0, GOLDEN_RATIO),
+                Art::Post => (BROWN, 0.8, GOLDEN_RATIO * 0.8),
                 Art::Sword => {
                     gl.push_model_matrix(glam::Mat4::from_translation(glam::vec3(
                         pos.x(),
