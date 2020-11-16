@@ -1,9 +1,12 @@
 #![feature(drain_filter)]
+#![feature(array_map)]
 use macroquad::prelude::*;
 
 #[allow(dead_code)]
 mod math;
 use std::f32::consts::FRAC_PI_2;
+
+use megaui_macroquad::{megaui, mouse_over_ui};
 
 macro_rules! or_err {
     ( $r:expr ) => {
@@ -216,8 +219,49 @@ impl Physics {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct EquippedWeapon(hecs::Entity);
+#[derive(Debug, Default, Clone)]
+struct Bag {
+    weapon: Option<hecs::Entity>,
+    temp_weapon: Option<Item>,
+    slots: [Option<Item>; 3],
+}
+impl Bag {
+    fn take(&mut self, items: impl Iterator<Item = Item>) {
+        for item in items {
+            if self.weapon.is_none() && self.temp_weapon.is_none() {
+                self.temp_weapon = Some(item);
+            } else {
+                let empty_slot = self.slots.iter_mut().find(|s| s.is_none());
+                if let Some(slot) = empty_slot {
+                    *slot = Some(item);
+                } else {
+                    dbg!("lmao ignoring item");
+                }
+            }
+        }
+    }
+}
+
+struct KeeperOfBags {
+    temp: Vec<(hecs::Entity, Item)>,
+}
+impl KeeperOfBags {
+    fn new() -> Self {
+        Self { temp: Vec::with_capacity(100) }
+    }
+
+    fn keep(&mut self, ecs: &mut hecs::World) {
+        self.temp.extend(ecs.query::<&mut Bag>().iter().filter_map(|(_, b)| {
+            let w = b.temp_weapon.take()?;
+            let e = ecs.reserve_entity();
+            b.weapon = Some(e);
+            Some((e, w))
+        }));
+        for (ent, weapon) in self.temp.drain(..) {
+            or_err!(ecs.insert(ent, weapon));
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 struct WeaponState {
@@ -289,22 +333,20 @@ impl Weapon<'_> {
 
     fn ent_hits(&mut self) -> smallvec::SmallVec<[hecs::Entity; 5]> {
         match self.wep.attack {
-            Attack::Swing(s) if s.doing_damage => {
-                self
-                    .contacts
-                    .0
-                    .iter()
-                    .map(|h| h.hit)
-                    .filter(|e| {
-                        if self.wep.ents_hit.contains(e) {
-                            false
-                        } else {
-                            self.wep.ents_hit.push(*e);
-                            true
-                        }
-                    })
-                    .collect()
-            },
+            Attack::Swing(s) if s.doing_damage => self
+                .contacts
+                .0
+                .iter()
+                .map(|h| h.hit)
+                .filter(|e| {
+                    if self.wep.ents_hit.contains(e) {
+                        false
+                    } else {
+                        self.wep.ents_hit.push(*e);
+                        true
+                    }
+                })
+                .collect(),
             _ => Default::default(),
         }
     }
@@ -341,7 +383,7 @@ impl Weapon<'_> {
                     target,
                     doing_damage: false,
                 })
-            },
+            }
             Swing(SwingState { end_tick, .. }) if end_tick < tick => {
                 self.wep.ents_hit.clear();
                 Cooldown { end_tick: tick + 10 }
@@ -424,7 +466,7 @@ struct Hero<'a> {
     vel: &'a mut Velocity,
     pos: &'a mut Vec2,
     art: &'a Art,
-    wep: &'a EquippedWeapon,
+    bag: &'a mut Bag,
 }
 impl Hero<'_> {
     fn movement(&mut self) {
@@ -446,7 +488,7 @@ impl Hero<'_> {
             self.vel.0 += move_vec * 0.0075;
         }
 
-        if is_mouse_button_down(MouseButton::Left) {
+        if !mouse_over_ui() && is_mouse_button_down(MouseButton::Left) {
             *self.vel.0.x_mut() =
                 self.vel.0.x().abs() * (mouse_position().0 - screen_width() / 2.0).signum();
         }
@@ -472,34 +514,33 @@ impl Art {
 #[derive(Copy, Clone, Debug)]
 struct Health(u32);
 
+#[derive(hecs::Bundle, Clone, Debug)]
+struct Item {
+    pos: Vec2,
+    art: Art,
+    rot: Rot,
+    phys: Phys,
+    wep: WeaponState,
+    contacts: Contacts,
+}
+
 #[macroquad::main("rpg")]
 async fn main() {
     let mut ecs = hecs::World::new();
     let mut damage_labels = DamageLabelBin::new();
     let mut drawer = Drawer::new();
     let mut physics = Physics::new();
+    let mut quests = Quests::new();
+    let mut keeper_of_bags = KeeperOfBags::new();
     let mut fps = Fps::new();
 
-    let wep = ecs.spawn((
-        Vec2::zero(),
-        Phys::new(&[
-            Circle::hurt(0.2, vec2(0.0, 1.35)),
-            Circle::hurt(0.185, vec2(0.0, 1.1)),
-            Circle::hurt(0.15, vec2(0.0, 0.85)),
-            Circle::hurt(0.125, vec2(0.0, 0.65)),
-        ]),
-        Rot(0.0),
-        WeaponState::default(),
-        Contacts::default(),
-        Art::Sword,
-    ));
     let hero = ecs.spawn((
-        Vec2::unit_y() * -5.0,
+        Vec2::unit_x() * -2.5,
         Velocity(Vec2::zero()),
         Phys::wings(0.3, 0.21, CircleKind::Push),
         Contacts::default(),
         Art::Hero,
-        EquippedWeapon(wep),
+        Bag::default(),
     ));
 
     ecs.spawn((
@@ -507,10 +548,10 @@ async fn main() {
         Phys::wings(0.3, 0.21, CircleKind::Push),
         Contacts::default(),
         Art::Npc,
-        Fixed
+        Fixed,
     ));
 
-    ecs.spawn((
+    let target = ecs.spawn((
         Vec2::unit_x() * 4.0,
         Phys::new(&[Circle::push(0.3, vec2(0.0, 0.1)), Circle::hit(0.4, vec2(0.0, 0.4))]),
         Health(5),
@@ -518,6 +559,48 @@ async fn main() {
         Art::Target,
         Fixed,
     ));
+
+    let target_quest = quests.add(Quest {
+        title: "Rpg Tropes II",
+        completion_quip: "My wife and children -- who probably don't even exist -- thank you!",
+        unlock_description: concat!(
+            "I'm going to have to ask you to ruthlessly destroy a scarecrow I \n",
+            "painstakingly made from scratch over the course of several days \n",
+            "because this game takes place before modern manufacturing practices, \n",
+            "but it's fine because it's not like I have anything else to do other \n",
+            "than stand here pretending to work on another one!",
+        ),
+        tasks: vec![Task { label: " Destroy Target", reqs: vec![Req::Destroy(target)] }],
+        ..Default::default()
+    });
+
+    quests.add(Quest {
+        title: "Rpg Tropes Abound!",
+        completion_quip: "Try not to poke your eye out, like the last adventurer ...",
+        unlock_description: concat!(
+            "It's dangerous to go alone! \n",
+            "Allow me to give you, a complete stranger, a dangerous weapon \n",
+            "because I just happen to believe that you may be capable and willing \n",
+            "to spare us from the horrible fate that will surely befall us regardless \n",
+            "of whether or not you spend three hours immersed in a fishing minigame.",
+        ),
+        unlocks: vec![target_quest],
+        reward_items: vec![Item {
+            pos: Vec2::zero(),
+            art: Art::Sword,
+            rot: Rot(0.0),
+            phys: Phys::new(&[
+                Circle::hurt(0.2, vec2(0.0, 1.35)),
+                Circle::hurt(0.185, vec2(0.0, 1.1)),
+                Circle::hurt(0.15, vec2(0.0, 0.85)),
+                Circle::hurt(0.125, vec2(0.0, 0.65)),
+            ]),
+            wep: WeaponState::default(),
+            contacts: Contacts::default(),
+        }],
+        completion: QuestCompletion::Unlocked,
+        ..Default::default()
+    });
 
     const STEP_EVERY: f64 = 1.0 / 60.0;
     let mut time = STEP_EVERY;
@@ -531,11 +614,14 @@ async fn main() {
             tick = tick.wrapping_add(1);
 
             physics.tick(&mut ecs);
+            let hero_rewards = quests.update(tick, &mut ecs);
+            keeper_of_bags.keep(&mut ecs);
 
             let (hero_pos, hero_wep, hero_vel) = match ecs.query_one_mut::<Hero>(hero) {
                 Ok(mut hero) => {
+                    hero.bag.take(hero_rewards.into_iter());
                     hero.movement();
-                    (*hero.pos, hero.wep.0, hero.vel.0)
+                    (*hero.pos, hero.bag.weapon, hero.vel.0)
                 }
                 Err(e) => {
                     error!("no hero!? {}", e);
@@ -544,12 +630,12 @@ async fn main() {
             };
             drawer.pan_cam_to = hero_pos;
 
-            let hero_attacks = ecs
-                .query_one_mut::<Weapon>(hero_wep)
-                .ok()
+            let hero_attacks = hero_wep
+                .and_then(|e| ecs.query_one_mut::<Weapon>(e).ok())
                 .map(|mut wep| {
                     wep.tick(WeaponInput {
-                        start_attacking: is_mouse_button_down(MouseButton::Left),
+                        start_attacking: !mouse_over_ui()
+                            && is_mouse_button_down(MouseButton::Left),
                         target: drawer.cam.screen_to_world(mouse_position().into()),
                         wielder_pos: hero_pos,
                         wielder_vel: hero_vel,
@@ -562,13 +648,9 @@ async fn main() {
             for &hit in &hero_attacks {
                 if let Ok((Health(hp), &pos)) = ecs.query_one_mut::<(&mut _, &_)>(hit) {
                     *hp -= 1;
-                    damage_labels.push(DamageLabel {
-                        tick,
-                        hp: -1,
-                        pos,
-                    });
+                    damage_labels.push(DamageLabel { tick, hp: -1, pos });
                     if *hp > 0 {
-                        continue
+                        continue;
                     }
                 }
                 or_err!(ecs.despawn(hit));
@@ -577,10 +659,301 @@ async fn main() {
 
         drawer.draw(&ecs);
         damage_labels.draw(tick, &drawer.cam);
+
+        quests.ui(&ecs);
+        megaui_macroquad::draw_megaui();
+
         fps.update();
         fps.draw();
 
         next_frame().await
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Task {
+    label: &'static str,
+    reqs: Vec<Req>,
+}
+impl Task {
+    fn done(&self, ecs: &hecs::World) -> bool {
+        self.reqs.iter().all(|r| r.done(ecs))
+    }
+}
+#[derive(Debug, Clone)]
+enum Req {
+    Destroy(hecs::Entity),
+}
+impl Req {
+    fn done(&self, ecs: &hecs::World) -> bool {
+        match self {
+            &Req::Destroy(e) => !ecs.contains(e),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct Quest {
+    title: &'static str,
+    unlock_description: &'static str,
+    completion_quip: &'static str,
+    tasks: Vec<Task>,
+    unlocks: Vec<usize>,
+    reward_items: Vec<Item>,
+    completion: QuestCompletion,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum QuestCompletion {
+    Locked,
+    Unlocked,
+    Accepted,
+    Finished { on_tick: u32 },
+}
+impl Default for QuestCompletion {
+    fn default() -> Self {
+        QuestCompletion::Locked
+    }
+}
+impl QuestCompletion {
+    fn locked(self) -> bool {
+        matches!(self, QuestCompletion::Locked)
+    }
+
+    fn unlocked(self) -> bool {
+        matches!(self, QuestCompletion::Unlocked)
+    }
+
+    fn unlock(&mut self) {
+        if self.locked() {
+            *self = QuestCompletion::Unlocked;
+        }
+    }
+
+    fn accepted(self) -> bool {
+        matches!(self, QuestCompletion::Accepted)
+    }
+
+    fn accept(&mut self) {
+        if self.unlocked() {
+            *self = QuestCompletion::Accepted;
+        }
+    }
+
+    fn finished(self) -> Option<u32> {
+        if let QuestCompletion::Finished { on_tick } = self {
+            Some(on_tick)
+        } else {
+            None
+        }
+    }
+
+    fn finish(&mut self, on_tick: u32) {
+        if self.accepted() {
+            *self = QuestCompletion::Finished { on_tick };
+        }
+    }
+}
+
+struct QuestVec(Vec<Quest>);
+impl QuestVec {
+    fn unlocked_mut(&mut self) -> impl Iterator<Item = (usize, &mut Quest)> {
+        self.0.iter_mut().enumerate().filter(|(_, q)| q.completion.unlocked())
+    }
+
+    fn accepted_mut(&mut self) -> impl Iterator<Item = (usize, &mut Quest)> {
+        self.0.iter_mut().enumerate().filter(|(_, q)| q.completion.accepted())
+    }
+
+    fn finished_mut(&mut self) -> impl Iterator<Item = (u32, usize, &mut Quest)> {
+        self.0.iter_mut().enumerate().filter_map(|(i, q)| Some((q.completion.finished()?, i, q)))
+    }
+
+    fn unlocked(&self) -> impl Iterator<Item = (usize, &Quest)> {
+        self.0.iter().enumerate().filter(|(_, q)| q.completion.unlocked())
+    }
+
+    fn accepted(&self) -> impl Iterator<Item = (usize, &Quest)> {
+        self.0.iter().enumerate().filter(|(_, q)| q.completion.accepted())
+    }
+
+    fn finished(&self) -> impl Iterator<Item = (u32, usize, &Quest)> {
+        self.0.iter().enumerate().filter_map(|(i, q)| Some((q.completion.finished()?, i, q)))
+    }
+}
+
+pub fn open_tree<F: FnOnce(&mut megaui::Ui)>(
+    ui: &mut megaui::Ui,
+    id: megaui::Id,
+    label: &str,
+    f: F,
+) -> bool {
+    megaui::widgets::TreeNode::new(id, label).init_unfolded().ui(ui, f)
+}
+
+struct Quests {
+    quests: QuestVec,
+    temp: Vec<usize>,
+    tab_titles: [String; 3],
+    new_tabs: [bool; 3],
+    jump_to_tab: Option<usize>,
+}
+impl Quests {
+    fn new() -> Self {
+        Self {
+            quests: QuestVec(Vec::with_capacity(100)),
+            temp: Vec::with_capacity(100),
+            tab_titles: [(); 3].map(|_| String::with_capacity(25)),
+            new_tabs: [false; 3],
+            jump_to_tab: None,
+        }
+    }
+
+    fn add(&mut self, q: Quest) -> usize {
+        let i = self.quests.0.len();
+        self.quests.0.push(q);
+        i
+    }
+
+    fn update(&mut self, tick: u32, ecs: &hecs::World) -> Vec<Item> {
+        let mut rewards = vec![];
+
+        for (_, quest) in self.quests.accepted_mut() {
+            let done = quest.tasks.iter().all(|t| t.done(ecs));
+
+            if done {
+                quest.completion.finish(tick);
+                self.jump_to_tab = Some(2);
+                self.temp.extend(quest.unlocks.iter().copied());
+                rewards.extend(quest.reward_items.iter().cloned());
+            }
+        }
+
+        for unlock in self.temp.drain(..) {
+            self.new_tabs[0] = true;
+            self.quests.0[unlock].completion.unlock();
+        }
+
+        rewards
+    }
+
+    fn unlocked_ui(&mut self, ui: &mut megaui::Ui) {
+        use megaui::widgets::Label;
+
+        ui.separator();
+        for (_, quest) in self.quests.unlocked_mut() {
+            ui.label(None, quest.title);
+            Label::new(quest.unlock_description).multiline(14.0).ui(ui);
+            if ui.button(None, "Accept") {
+                quest.completion.accept();
+                self.new_tabs[1] = true;
+            }
+            ui.separator();
+        }
+    }
+
+    fn accepted_ui(&mut self, ui: &mut megaui::Ui, ecs: &hecs::World) {
+        use megaui::hash;
+
+        ui.separator();
+        for (i, quest) in self.quests.accepted() {
+            open_tree(ui, hash!(i), quest.title, |ui| {
+                for task in &quest.tasks {
+                    ui.label(None, &task.label);
+                }
+            });
+            ui.separator();
+        }
+    }
+
+    fn finished_ui(&mut self, ui: &mut megaui::Ui) {
+        use megaui::{hash, widgets::Label};
+
+        ui.separator();
+        for (i, _, quest) in self.quests.finished() {
+            open_tree(ui, hash!(i), quest.title, |ui| {
+                ui.label(None, quest.completion_quip);
+                open_tree(ui, hash!(i, "r"), "Rewards", |ui| {
+                    for item in &quest.reward_items {
+                        ui.label(None, &format!("{:#?}", item.art));
+                    }
+                });
+                ui.tree_node(hash!(i, "u"), "Unlock Text", |ui| {
+                    Label::new(quest.unlock_description).multiline(14.0).ui(ui);
+                });
+            });
+            ui.separator();
+        }
+    }
+
+    fn size() -> Vec2 {
+        vec2(520.0, 230.0)
+    }
+
+    fn tab_titles(&mut self) -> [&str; 3] {
+        for (i, &n) in [
+            self.quests.unlocked().count(),
+            self.quests.accepted().count(),
+            self.quests.finished().count(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            self.tab_titles[i] = format!(
+                "{} [{}] {}",
+                if self.new_tabs[i] { "NEW! " } else { "" },
+                n,
+                ["Unlocked", "Accepted", "Finished"][i],
+            );
+        }
+        [&self.tab_titles[0], &self.tab_titles[1], &self.tab_titles[2]]
+    }
+
+    fn ui(&mut self, ecs: &hecs::World) {
+        use megaui_macroquad::{
+            draw_window,
+            megaui::{
+                hash,
+                widgets::{Group, Tabbar},
+                Vector2,
+            },
+            WindowParams,
+        };
+
+        let size = Self::size();
+        draw_window(
+            hash!(),
+            (vec2(screen_width(), screen_height()) - size) / 2.0,
+            size,
+            WindowParams { label: "Quests".to_string(), ..Default::default() },
+            |ui| {
+                let tab_height = 22.5;
+                let tab = {
+                    let jump = self.jump_to_tab.take();
+                    let titles = self.tab_titles();
+                    let mut tabbar = Tabbar::new(
+                        hash!(),
+                        Vector2::new(0.0, 0.0),
+                        Vector2::new(size.x(), tab_height),
+                        &titles,
+                    );
+                    if let Some(n) = jump {
+                        tabbar = tabbar.jump_to_tab(n);
+                    }
+                    tabbar.ui(ui)
+                };
+
+                self.new_tabs[tab as usize] = false;
+                Group::new(hash!(), Vector2::new(size.x(), size.y() - tab_height * 2.0))
+                    .position(Vector2::new(0.0, tab_height))
+                    .ui(ui, |ui| match tab {
+                        0 => self.unlocked_ui(ui),
+                        1 => self.accepted_ui(ui, ecs),
+                        2 => self.finished_ui(ui),
+                        _ => unreachable!(),
+                    });
+            },
+        );
     }
 }
 
@@ -615,7 +988,7 @@ impl Fps {
 struct DamageLabel {
     pos: Vec2,
     hp: i32,
-    tick: u32
+    tick: u32,
 }
 
 struct DamageLabelBin {
@@ -624,10 +997,7 @@ struct DamageLabelBin {
 }
 impl DamageLabelBin {
     fn new() -> Self {
-        Self {
-            labels: Vec::with_capacity(1000),
-            text: String::with_capacity(100),
-        }
+        Self { labels: Vec::with_capacity(1000), text: String::with_capacity(100) }
     }
 
     fn push(&mut self, label: DamageLabel) {
@@ -642,7 +1012,7 @@ impl DamageLabelBin {
 
             *text = l.hp.to_string();
             let (x, y) = cam.world_to_screen(l.pos).into();
-            draw_text(text, x - 20.0, y - 60.0 - (tick - l.tick) as f32, 42.0, MAROON);
+            draw_text(text, x - 20.0, y - 120.0 - (tick - l.tick) as f32, 42.0, MAROON);
 
             tick > end_tick
         });
@@ -658,10 +1028,7 @@ impl Drawer {
     fn new() -> Self {
         Self {
             sprites: Vec::with_capacity(1000),
-            cam: Camera2D {
-                zoom: vec2(1.0, screen_width() / screen_height()) / 7.8,
-                ..Default::default()
-            },
+            cam: Default::default(),
             pan_cam_to: Vec2::zero(),
         }
     }
@@ -670,6 +1037,7 @@ impl Drawer {
         use std::cmp::Ordering::Less;
         let Self { sprites, cam, .. } = self;
         cam.target = cam.target.lerp(self.pan_cam_to, 0.05);
+        cam.zoom = vec2(1.0, screen_width() / screen_height()) / 7.8;
         set_camera(*cam);
 
         clear_background(Color([180, 227, 245, 255]));
