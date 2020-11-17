@@ -33,6 +33,10 @@ macro_rules! system {
     };
 }
 
+fn float_cmp<T>(a: T, b: T, mut f: impl FnMut(T) -> f32) -> std::cmp::Ordering {
+    f(a).partial_cmp(&f(b)).unwrap_or(std::cmp::Ordering::Greater)
+}
+
 #[derive(Debug, Copy, Clone)]
 struct Velocity(Vec2);
 
@@ -495,6 +499,15 @@ impl Direction {
         }
     }
 }
+impl From<f32> for Direction {
+    fn from(f: f32) -> Self {
+        if f < 0.0 {
+            Direction::Left
+        } else {
+            Direction::Right
+        }
+    }
+}
 
 #[derive(hecs::Query, Debug)]
 struct Hero<'a> {
@@ -588,6 +601,23 @@ struct Item {
     wep: WeaponState,
     contacts: Contacts,
 }
+impl Item {
+    fn sword() -> Self {
+        Self {
+            pos: Vec2::zero(),
+            art: Art::Sword,
+            rot: Rot(0.0),
+            phys: Phys::new(&[
+                Circle::hurt(0.2, vec2(0.0, 1.35)),
+                Circle::hurt(0.185, vec2(0.0, 1.1)),
+                Circle::hurt(0.15, vec2(0.0, 0.85)),
+                Circle::hurt(0.125, vec2(0.0, 0.65)),
+            ]),
+            wep: WeaponState::default(),
+            contacts: Contacts::default(),
+        }
+    }
+}
 
 fn rand_vec2() -> Vec2 {
     Rot(rand::rand() as f32 / (u32::MAX as f32 / TAU)).vec2()
@@ -668,10 +698,65 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
     }
 }
 
+struct Enemy;
+const SLOT_COUNT: usize = 7;
+struct Waffle {
+    enemies: Vec<(hecs::Entity, Vec2, Velocity)>,
+}
+impl Waffle {
+    fn new() -> Self {
+        Self { enemies: Vec::with_capacity(100) }
+    }
+
+    fn update(&mut self, game: &mut Game) {
+        let &mut Game { hero_pos, tick, .. } = game;
+        let Self { enemies, .. } = self;
+        enemies.extend(game.ecs.query::<(&_, &_, &Enemy)>().iter().map(|(e, (x, v, _))| (e, *x, *v)));
+        enemies.sort_by(|a, b| float_cmp(a, b, |&(_, p, _)| (hero_pos - p).length_squared()));
+
+        let mut slots = [false; SLOT_COUNT];
+        for (e, pos, vel) in enemies.drain(..) {
+            let slot = circle_points(7)
+                .map(|v| (Rot(0.1).apply(v) * 1.6 + hero_pos) - pos)
+                .enumerate()
+                .filter(|&(i, _)| !slots[i])
+                .min_by(|a, b| float_cmp(a, b, |d| d.1.length_squared()));
+
+            if let Some((i, delta)) = slot {
+                slots[i] = true;
+                if let Ok(Velocity(vel)) = game.ecs.get_mut(e).as_deref_mut() {
+                    *vel += delta * 0.0035;
+                }
+            }
+
+            if let Ok(Some(wep_ent)) = game.ecs.get::<Bag>(e).map(|b| b.weapon) {
+                let attacks = game.ecs.query_one_mut::<Weapon>(wep_ent).ok()
+                    .map(|mut wep| {
+                        wep.tick(WeaponInput {
+                            start_attacking: false,
+                            target: hero_pos,
+                            wielder_pos: pos,
+                            wielder_vel: vel.0,
+                            wielder_dir: (hero_pos - pos).x().into(),
+                            tick,
+                        });
+                        wep.ent_hits()
+                    })
+                    .unwrap_or_default();
+
+                for &hit in &attacks {
+                    game.hit(hit);
+                }
+            }
+        }
+    }
+}
+
 #[macroquad::main("rpg")]
 async fn main() {
     let mut ecs = hecs::World::new();
     let mut drawer = Drawer::new();
+    let mut waffle = Waffle::new();
     let mut physics = Physics::new();
     let mut quests = Quests::new();
     let mut keeper_of_bags = KeeperOfBags::new();
@@ -795,6 +880,9 @@ async fn main() {
                     for &tw in &terrorworms {
                         drop(g.innocent_for(tw, 10));
                         drop(g.ecs.remove_one::<Wander>(tw));
+                        let mut bag = Bag::default();
+                        bag.take(std::iter::once(Item::sword()));
+                        drop(g.ecs.insert(tw, (Enemy, bag)));
                     }
                 }),
                 ..Default::default()
@@ -854,19 +942,7 @@ async fn main() {
             "of whether or not you spend three hours immersed in a fishing minigame.",
         ),
         unlocks: vec![rpg_tropes_2],
-        reward_items: vec![Item {
-            pos: Vec2::zero(),
-            art: Art::Sword,
-            rot: Rot(0.0),
-            phys: Phys::new(&[
-                Circle::hurt(0.2, vec2(0.0, 1.35)),
-                Circle::hurt(0.185, vec2(0.0, 1.1)),
-                Circle::hurt(0.15, vec2(0.0, 0.85)),
-                Circle::hurt(0.125, vec2(0.0, 0.65)),
-            ]),
-            wep: WeaponState::default(),
-            contacts: Contacts::default(),
-        }],
+        reward_items: vec![Item::sword()],
         completion: QuestCompletion::Unlocked,
         ..Default::default()
     });
@@ -885,6 +961,7 @@ async fn main() {
 
             physics.tick(&mut game.ecs);
             quests.update(&mut game);
+            waffle.update(&mut game);
             keeper_of_bags.keep(&mut game.ecs);
             wander(&mut game.ecs);
 
@@ -1348,7 +1425,6 @@ impl Drawer {
     }
 
     fn sprites(&mut self, Game { ecs, .. }: &Game) {
-        use std::cmp::Ordering::Less;
         let Self { sprites, cam, .. } = self;
         cam.zoom = vec2(1.0, screen_width() / screen_height()) / 7.8;
         set_camera(*cam);
@@ -1360,11 +1436,7 @@ impl Drawer {
         sprites.extend(
             ecs.query::<(&_, &_, Option<&Rot>)>().iter().map(|(_, (&p, &a, r))| (p, a, r.copied())),
         );
-        sprites.sort_by(|(pos_a, art_a, ..), (pos_b, art_b, ..)| {
-            let a = pos_a.y() + art_a.z_offset();
-            let b = pos_b.y() + art_b.z_offset();
-            b.partial_cmp(&a).unwrap_or(Less)
-        });
+        sprites.sort_by(|a, b| float_cmp(b, a, |(pos, art, _)| pos.y() + art.z_offset()));
         for (pos, art, rot) in sprites.drain(..) {
             const GOLDEN_RATIO: f32 = 1.618034;
 
