@@ -13,8 +13,8 @@ show-collide = []
 hecs = { git = "https://github.com/Ralith/hecs", features = [ "macros" ] }
 macroquad = { git = "https://github.com/not-fl3/macroquad", features = ["log-impl"] }
 megaui-macroquad =  { git = "https://github.com/not-fl3/megaui-macroquad" }
-smallvec = "1.4.2"
 fxhash = "0.2.1"
+smallvec = "1.4.2"
 
 [patch.crates-io]
 macroquad = { git = "https://github.com/not-fl3/macroquad", features = ["log-impl"] }

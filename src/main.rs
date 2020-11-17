@@ -5,7 +5,7 @@ use macroquad::prelude::*;
 
 #[allow(dead_code)]
 mod math;
-use std::f32::consts::FRAC_PI_2;
+use std::f32::consts::{FRAC_PI_2, TAU};
 
 use megaui_macroquad::{megaui, mouse_over_ui};
 
@@ -70,23 +70,39 @@ impl Circle {
     }
 }
 
-#[derive(Debug, Clone)]
-struct Phys(smallvec::SmallVec<[Circle; 5]>);
+#[derive(Debug, Clone, Copy)]
+struct Phys([Option<Circle>; 5]);
 impl Phys {
     fn new(circles: &[Circle]) -> Self {
-        Phys(smallvec::SmallVec::from_slice(circles))
+        let mut s = [None; 5];
+        for (i, c) in circles.iter().copied().enumerate() {
+            s[i] = Some(c);
+        }
+        Self(s)
     }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Circle> {
+        self.0.iter_mut().filter_map(|s| s.as_mut())
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Circle> {
+        self.0.iter().filter_map(|s| s.as_ref())
+    }
+
+    fn pushfoot_bighit() -> Self {
+        Self::new(&[Circle::push(0.3, vec2(0.0, 0.1)), Circle::hit(0.4, vec2(0.0, 0.4))])
+    }
+
+    fn pushfoot(r: f32) -> Self {
+        Self::new(&[Circle::push(r, vec2(0.0, r))])
+    }
+
     fn wings(r: f32, wr: f32, kind: CircleKind) -> Self {
-        Phys(
-            [
-                Circle(r, vec2(0.0, r), kind),
-                Circle(wr, vec2(-r, r), kind),
-                Circle(wr, vec2(r, r), kind),
-            ]
-            .iter()
-            .copied()
-            .collect(),
-        )
+        Self::new(&[
+            Circle(r, vec2(0.0, r), kind),
+            Circle(wr, vec2(-r, r), kind),
+            Circle(wr, vec2(r, r), kind),
+        ])
     }
 }
 
@@ -96,11 +112,9 @@ struct Contacts(smallvec::SmallVec<[Hit; 5]>);
 struct Hit {
     normal: Vec2,
     depth: f32,
+    circle_kinds: [CircleKind; 2],
     hit: hecs::Entity,
 }
-
-#[derive(Debug, Clone, Copy)]
-struct Fixed;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Rot(f32);
@@ -134,7 +148,6 @@ impl Rot {
 #[test]
 fn apply_unapply() {
     for i in 0..8 {
-        use std::f32::consts::TAU;
         let r = Rot(i as f32 / TAU);
         let v = Vec2::unit_y();
         assert!(r.unapply(r.apply(v)).abs_diff_eq(v, 0.001));
@@ -169,17 +182,16 @@ impl Physics {
             *vel *= 0.93;
         });
 
-        circles.extend(
-            ecs.query::<(&Vec2, &Phys)>().iter().map(|(e, (&pos, phys))| (e, pos, phys.clone())),
-        );
-        for (e0, p0, Phys(circles0)) in circles.drain(..) {
+        circles
+            .extend(ecs.query::<(&Vec2, &Phys)>().iter().map(|(e, (&pos, &phys))| (e, pos, phys)));
+        for (e0, p0, phys0) in circles.drain(..) {
             system!(ecs, e1,
-                &p1             = &Vec2
-                Phys(circles1) = &_
+                &p1   = &Vec2
+                phys1 = &Phys
             {
                 if e1 == e0 { continue }
-                for &Circle(r0, o0, k0) in circles0.iter() {
-                    for &Circle(r1, o1, k1) in circles1.iter() {
+                for &Circle(r0, o0, k0) in phys0.iter() {
+                    for &Circle(r1, o1, k1) in phys1.iter() {
                         if !k0.hits(k1) { continue }
 
                         let delta = (p0 + o0) - (p1 + o1);
@@ -190,6 +202,7 @@ impl Physics {
                                 hit: e1,
                                 depth,
                                 normal: delta.normalize(),
+                                circle_kinds: [k0, k1],
                             }));
                             hit_ents.insert(e0);
                         }
@@ -215,11 +228,12 @@ impl Physics {
             pos            = &mut Vec2
             Velocity(vel)  = &mut _
             Contacts(hits) = &_
-        > without Fixed,
         {
-            for &Hit { depth, normal, .. } in hits {
-                *pos += normal * depth;
-                *vel += normal * depth;
+            for &Hit { depth, normal, circle_kinds, .. } in hits {
+                if circle_kinds == [CircleKind::Push, CircleKind::Push] {
+                    *pos += normal * depth;
+                    *vel += normal * depth;
+                }
             }
         });
     }
@@ -316,7 +330,7 @@ struct Weapon<'a> {
 }
 impl Weapon<'_> {
     fn tick(&mut self, input: WeaponInput) {
-        for Circle(_, o, _) in self.phy.0.iter_mut() {
+        for Circle(_, o, _) in self.phy.iter_mut() {
             *o = self.wep.last_rot.unapply(*o);
         }
 
@@ -333,7 +347,7 @@ impl Weapon<'_> {
         }
 
         self.wep.last_rot = *self.rot;
-        for Circle(_, o, _) in self.phy.0.iter_mut() {
+        for Circle(_, o, _) in self.phy.iter_mut() {
             *o = self.rot.apply(*o);
         }
     }
@@ -344,6 +358,7 @@ impl Weapon<'_> {
                 .contacts
                 .0
                 .iter()
+                .filter(|h| matches!(h.circle_kinds[0], CircleKind::Hurt | CircleKind::Hit))
                 .map(|h| h.hit)
                 .filter(|e| {
                     if self.wep.ents_hit.contains(e) {
@@ -531,6 +546,7 @@ impl Hero<'_> {
 enum Art {
     Hero,
     Scarecrow,
+    TripletuftedTerrorworm,
     Npc,
     Sword,
     Post,
@@ -540,6 +556,22 @@ impl Art {
         match self {
             Art::Sword => -0.5,
             _ => 0.0,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+/// Entities with Innocence may be impervious to damage.
+enum Innocence {
+    Unwavering,
+    /// Innocence can expire after a set date.
+    Expires(u32),
+}
+impl Innocence {
+    fn active(self, tick: u32) -> bool {
+        match self {
+            Innocence::Unwavering => true,
+            Innocence::Expires(on) => tick <= on,
         }
     }
 }
@@ -557,22 +589,95 @@ struct Item {
     contacts: Contacts,
 }
 
-fn circle_points(n: usize, radius: f32) -> impl Iterator<Item = Vec2> {
-    use std::f32::consts::TAU;
-    (0..n).map(move |i| Rot((i as f32 / n as f32) * TAU).vec2() * radius)
+fn rand_vec2() -> Vec2 {
+    Rot(rand::rand() as f32 / (u32::MAX as f32 / TAU)).vec2()
+}
+
+struct Wander {
+    pen_pos: Vec2,
+    pen_radius: f32,
+    speed: f32,
+    goal: Vec2,
+}
+impl Wander {
+    fn around(pen_pos: Vec2, pen_radius: f32) -> Self {
+        Wander {
+            pen_pos,
+            pen_radius,
+            speed: 0.001,
+            goal: rand_vec2() * rand::gen_range(0.0, pen_radius) + pen_pos,
+        }
+    }
+}
+
+fn wander(ecs: &mut hecs::World) {
+    system!(ecs, _,
+        w           = &mut Wander
+        Velocity(v) = &mut _
+        &p          = &Vec2
+    {
+        let delta = w.goal - p;
+        if delta.length() < 0.05 {
+            w.goal = rand_vec2() * rand::gen_range(0.0, w.pen_radius) + w.pen_pos;
+        }
+        *v += delta.normalize() * w.speed;
+    });
+}
+
+fn circle_points(n: usize) -> impl Iterator<Item = Vec2> {
+    (0..n).map(move |i| Rot((i as f32 / n as f32) * TAU).vec2())
+}
+
+fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
+    let &Game { tick, mouse_pos, .. } = &*game;
+
+    let (hero_pos, hero_wep, hero_vel, hero_dir) =
+        match game.ecs.query_one_mut::<Hero>(hero) {
+            Ok(mut hero) => {
+                hero.bag.take(quests.hero_rewards.drain(..));
+                hero.movement();
+                (*hero.pos, hero.bag.weapon, hero.vel.0, *hero.dir)
+            }
+            Err(e) => {
+                error!("no hero!? {}", e);
+                return;
+            }
+        };
+    game.hero_pos = hero_pos;
+
+    let hero_attacks = hero_wep
+        .and_then(|e| game.ecs.query_one_mut::<Weapon>(e).ok())
+        .map(|mut wep| {
+            wep.tick(WeaponInput {
+                start_attacking: !mouse_over_ui()
+                    && is_mouse_button_down(MouseButton::Left),
+                target: mouse_pos,
+                wielder_pos: hero_pos,
+                wielder_vel: hero_vel,
+                wielder_dir: hero_dir,
+                tick,
+            });
+            wep.ent_hits()
+        })
+        .unwrap_or_default();
+
+    for &hit in &hero_attacks {
+        if game.hit(hit) {
+            quests.update(game);
+        }
+    }
 }
 
 #[macroquad::main("rpg")]
 async fn main() {
     let mut ecs = hecs::World::new();
-    let mut damage_labels = DamageLabelBin::new();
     let mut drawer = Drawer::new();
     let mut physics = Physics::new();
     let mut quests = Quests::new();
     let mut keeper_of_bags = KeeperOfBags::new();
     let mut fps = Fps::new();
 
-    let npc = |npc_pos| (npc_pos, Phys::wings(0.3, 0.21, CircleKind::Push), Art::Npc, Fixed);
+    let npc = |npc_pos| (npc_pos, Phys::wings(0.3, 0.21, CircleKind::Push), Art::Npc);
 
     let hero = ecs.spawn((
         Vec2::unit_x() * -2.5,
@@ -583,30 +688,123 @@ async fn main() {
         Bag::default(),
     ));
 
-    ecs.spawn(npc(vec2(-4.0, 0.0)));
-    let scarecrow = ecs.spawn((
-        vec2(3.4, -0.4),
-        Phys::new(&[Circle::push(0.3, vec2(0.0, 0.1)), Circle::hit(0.4, vec2(0.0, 0.4))]),
-        Health(5),
-        Art::Scarecrow,
-        Fixed,
-    ));
+    type Post = (Vec2, Art, Phys);
+    #[derive(Clone, Copy)]
+    struct Pen {
+        gate: [(hecs::Entity, Post); 2],
+        pos: Vec2,
+        radius: f32,
+    }
+    impl Pen {
+        fn new(ecs: &mut hecs::World) -> Self {
+            let mut pen = Self {
+                gate: unsafe { [std::mem::zeroed(), std::mem::zeroed()] },
+                radius: 4.5,
+                pos: vec2(5.0, 5.0),
+            };
+            for (i, post_pos) in circle_points(36).enumerate() {
+                let post = pen.post(post_pos);
+                let e = ecs.spawn(post.clone());
 
-    let npc2 = ecs.spawn(npc(vec2(4.0, 11.0)));
-    for (i, post_pos) in circle_points(28, 4.5).enumerate() {
-        if i == 16 / 2 {
-            continue;
+                let gate_i = i - 36 / 4;
+                if gate_i <= 1 {
+                    pen.gate[gate_i] = (e, post);
+                }
+            }
+
+            pen
         }
-        ecs.spawn((
-            post_pos + vec2(5.0, 5.0),
-            Art::Post,
-            Phys::new(&[Circle::push(0.4, vec2(0.0, 0.4))]),
-            Fixed,
-        ));
+
+        fn post(&self, post_pos: Vec2) -> Post {
+            (post_pos * self.radius + self.pos, Art::Post, Phys::pushfoot(0.4))
+        }
+
+        fn gate_open(&self, ecs: &mut hecs::World) {
+            for (e, _) in self.gate.iter() {
+                or_err!(ecs.remove::<(Phys, Art)>(*e));
+            }
+        }
+
+        fn gate_close(&self, ecs: &mut hecs::World) {
+            for (e, c) in self.gate.iter() {
+                or_err!(ecs.insert(*e, c.clone()));
+            }
+        }
     }
 
+    let npc2 = ecs.spawn(npc(vec2(4.0, 11.0)));
+    let pen = Pen::new(&mut ecs);
+    let (pen_pos, pen_radius) = (pen.pos, pen.radius);
+    let terrorworms = {
+        let mut circle = circle_points(6);
+        [(); 6].map(|_| {
+            ecs.spawn((
+                circle.next().unwrap() * 2.0 + pen.pos,
+                Art::TripletuftedTerrorworm,
+                Wander::around(pen.pos, pen.radius * 0.4),
+                Velocity(Vec2::zero()),
+                Innocence::Unwavering,
+                Phys::pushfoot_bighit(),
+                Health(1),
+            ))
+        })
+    };
+
+    let rpg_tropes_4 = quests.add(Quest {
+        title: "RPG Tropes IV - Tripletufted Terrorworms",
+        completion_quip: "Of course they just come back ... you need a Honeycoated Heptahorn!",
+        unlock_description: concat!(
+            "Oh, adventurer, I'm so glad you've come along! \n",
+            "In fact, it's almost like I've just been standing here since \n",
+            "the dawn of time itself, waiting for someone to come help me. In fact, \n",
+            "it's almost as if I was created simply to give you something to do. \n",
+            "In this pen are the last Tripletufted Terrorworms known to exist, and \n",
+            "I need you to forgo your conscience and simply slaughter them: no remorse.",
+        ),
+        on_accept: Some(Box::new(move |g| pen.gate_open(&mut g.ecs))),
+        tasks: vec![
+            Task {
+                label: "Enter the Pen",
+                req: Box::new(move |g| g.hero_dist(pen_pos) < pen_radius * 0.9),
+                on_finish: Box::new(move |g| {
+                    for &tw in &terrorworms {
+                        drop(g.innocent_for(tw, 1));
+                    }
+                    pen.gate_close(&mut g.ecs)
+                }),
+                ..Default::default()
+            },
+            Task {
+                label: "Slaughter the first one",
+                req: Box::new(move |g| terrorworms.iter().filter(|&&e| g.dead(e)).count() == 1),
+                on_finish: Box::new(move |g| {
+                    for &tw in &terrorworms {
+                        drop(g.innocent_for(tw, 10));
+                        if let Ok(Wander { goal, speed, .. }) = g.ecs.get_mut(tw).as_deref_mut() {
+                            *goal = rand_vec2() * pen_radius + pen_pos;
+                            *speed *= 2.5;
+                        }
+                    }
+                }),
+                ..Default::default()
+            },
+            Task {
+                label: "Slaughter the second one",
+                req: Box::new(move |g| terrorworms.iter().filter(|&&e| g.dead(e)).count() == 2),
+                on_finish: Box::new(move |g| {
+                    for &tw in &terrorworms {
+                        drop(g.innocent_for(tw, 10));
+                        drop(g.ecs.remove_one::<Wander>(tw));
+                    }
+                }),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+
     let rpg_tropes_3 = quests.add(Quest {
-        title: "RPG Tropes III",
+        title: "RPG Tropes III - Couriers",
         completion_quip: "Save us from impending doom! But first, give this to my girlfriend.",
         unlock_description: concat!(
             "I'm happy to say that you've come to the part of your journey where \n",
@@ -614,12 +812,20 @@ async fn main() {
             "So long adventurer, and thanks for nothing! \n\n",
             "P.S. Don't forget to save me from certain doom!",
         ),
-        tasks: vec![Task { label: "Talk to NPC 2", reqs: vec![Req::TalkTo(npc2)] }],
+        tasks: vec![Task {
+            label: "Talk to NPC 2",
+            req: Box::new(move |g| g.hero_dist_ent(npc2) < 1.3),
+            ..Default::default()
+        }],
+        unlocks: vec![rpg_tropes_4],
         ..Default::default()
     });
 
+    ecs.spawn(npc(vec2(-4.0, 0.0)));
+    let scarecrow =
+        ecs.spawn((vec2(3.4, -0.4), Phys::pushfoot_bighit(), Health(5), Art::Scarecrow));
     let rpg_tropes_2 = quests.add(Quest {
-        title: "RPG Tropes II",
+        title: "RPG Tropes II - Scarecrows",
         completion_quip: "My wife and children -- who probably don't even exist -- thank you!",
         unlock_description: concat!(
             "I'm going to have to ask you to ruthlessly destroy a scarecrow I \n",
@@ -628,7 +834,11 @@ async fn main() {
             "but it's fine because it's not like I have anything else to do other \n",
             "than stand here pretending to work on another one!",
         ),
-        tasks: vec![Task { label: "Destroy Scarecrow", reqs: vec![Req::Destroy(scarecrow)] }],
+        tasks: vec![Task {
+            label: "Destroy Scarecrow",
+            req: Box::new(move |g| g.dead(scarecrow)),
+            ..Default::default()
+        }],
         unlocks: vec![rpg_tropes_3],
         ..Default::default()
     });
@@ -664,71 +874,28 @@ async fn main() {
     const STEP_EVERY: f64 = 1.0 / 60.0;
     let mut time = STEP_EVERY;
     let mut step = get_time();
-    let mut tick: u32 = 0;
+    let mut game = Game { ecs, hero_pos: Vec2::zero(), tick: 0, mouse_pos: Vec2::zero() };
     loop {
         time += get_time() - step;
         step = get_time();
         while time >= STEP_EVERY {
             time -= STEP_EVERY;
-            tick = tick.wrapping_add(1);
+            game.tick = game.tick.wrapping_add(1);
+            game.mouse_pos = drawer.cam.screen_to_world(mouse_position().into());
 
-            physics.tick(&mut ecs);
-            let hero_rewards = quests.update(&QuestInput {
-                tick,
-                hero_pos: ecs.query_one_mut::<&Vec2>(hero).as_deref().copied().unwrap_or_default(),
-                ecs: &ecs,
-            });
-            keeper_of_bags.keep(&mut ecs);
+            physics.tick(&mut game.ecs);
+            quests.update(&mut game);
+            keeper_of_bags.keep(&mut game.ecs);
+            wander(&mut game.ecs);
 
-            let (hero_pos, hero_wep, hero_vel, hero_dir) = match ecs.query_one_mut::<Hero>(hero) {
-                Ok(mut hero) => {
-                    hero.bag.take(hero_rewards.into_iter());
-                    hero.movement();
-                    (*hero.pos, hero.bag.weapon, hero.vel.0, *hero.dir)
-                }
-                Err(e) => {
-                    error!("no hero!? {}", e);
-                    continue;
-                }
-            };
-            drawer.pan_cam_to = hero_pos;
+            update_hero(hero, &mut game, &mut quests);
 
-            let hero_attacks = hero_wep
-                .and_then(|e| ecs.query_one_mut::<Weapon>(e).ok())
-                .map(|mut wep| {
-                    wep.tick(WeaponInput {
-                        start_attacking: !mouse_over_ui()
-                            && is_mouse_button_down(MouseButton::Left),
-                        target: drawer.cam.screen_to_world(mouse_position().into()),
-                        wielder_pos: hero_pos,
-                        wielder_vel: hero_vel,
-                        wielder_dir: hero_dir,
-                        tick,
-                    });
-                    wep.ent_hits()
-                })
-                .unwrap_or_default();
-
-            for &hit in &hero_attacks {
-                if let Ok((Health(hp), &pos)) = ecs.query_one_mut::<(&mut _, &_)>(hit) {
-                    *hp -= 1;
-                    damage_labels.push(DamageLabel { tick, hp: -1, pos });
-                    if *hp > 0 {
-                        continue;
-                    }
-                }
-                or_err!(ecs.despawn(hit));
-            }
+            drawer.update(&mut game);
         }
 
-        drawer.draw(&ecs);
-        damage_labels.draw(tick, &drawer.cam);
+        drawer.draw(&game);
 
-        quests.ui(&QuestInput {
-            tick,
-            hero_pos: ecs.query_one_mut::<&Vec2>(hero).as_deref().copied().unwrap_or_default(),
-            ecs: &ecs,
-        });
+        quests.ui(&game);
         megaui_macroquad::draw_megaui();
 
         fps.update();
@@ -738,43 +905,86 @@ async fn main() {
     }
 }
 
-struct QuestInput<'a> {
-    ecs: &'a hecs::World,
+struct Game {
+    ecs: hecs::World,
     hero_pos: Vec2,
+    /// In game coordinates
+    mouse_pos: Vec2,
     tick: u32,
 }
-
-#[derive(Debug, Clone)]
-struct Task {
-    label: &'static str,
-    reqs: Vec<Req>,
-}
-impl Task {
-    fn done(&self, qi: &QuestInput) -> bool {
-        self.reqs.iter().all(|r| r.done(qi))
+impl Game {
+    fn dead(&self, e: hecs::Entity) -> bool {
+        !self.ecs.contains(e)
     }
-}
-#[derive(Debug, Clone)]
-enum Req {
-    Destroy(hecs::Entity),
-    TalkTo(hecs::Entity),
-}
-impl Req {
-    fn done(&self, qi: &QuestInput) -> bool {
-        match self {
-            &Req::Destroy(e) => !qi.ecs.contains(e),
-            &Req::TalkTo(e) => {
-                qi.ecs.get::<Vec2>(e).map(|p| (*p - qi.hero_pos).length() < 1.3).unwrap_or(false)
+
+    fn hero_dist(&self, p: Vec2) -> f32 {
+        (p - self.hero_pos).length()
+    }
+
+    fn hero_dist_ent(&self, e: hecs::Entity) -> f32 {
+        self.ecs.get::<Vec2>(e).map(|p| (*p - self.hero_pos).length()).unwrap_or(f32::INFINITY)
+    }
+
+    fn innocent_for(&mut self, e: hecs::Entity, duration: u32) -> Result<(), hecs::NoSuchEntity> {
+        let ends = self.tick + duration;
+        self.ecs.insert_one(e, Innocence::Expires(ends))
+    }
+
+    /// Returns true if they died
+    fn hit(&mut self, hit: hecs::Entity) -> bool {
+        let tick = self.tick;
+
+        if let Ok((Health(hp), &pos, innocence)) =
+            self.ecs.query_one_mut::<(&mut _, &_, Option<&Innocence>)>(hit)
+        {
+            if let Some(true) = innocence.map(|i| i.active(tick)) {
+                return false;
             }
+
+            *hp -= 1;
+            let dead = *hp == 0;
+            if dead {
+                or_err!(self.ecs.despawn(hit));
+            }
+            self.ecs.spawn((DamageLabel { tick, hp: -1, pos },));
+
+            dead
+        } else {
+            false
         }
     }
 }
 
-#[derive(Debug, Clone, Default)]
+struct Task {
+    label: &'static str,
+    req: Box<dyn FnMut(&Game) -> bool>,
+    on_finish: Box<dyn FnMut(&mut Game)>,
+    finished: bool,
+}
+impl Default for Task {
+    fn default() -> Self {
+        Self { label: "", req: Box::new(|_| true), on_finish: Box::new(|_| {}), finished: false }
+    }
+}
+impl Task {
+    fn done(&mut self, g: &mut Game) -> bool {
+        let Self { finished, req, .. } = self;
+        if !*finished {
+            *finished = (*req)(&*g);
+            if *finished {
+                (self.on_finish)(g);
+            }
+        }
+        *finished
+    }
+}
+
+#[derive(Default)]
 struct Quest {
     title: &'static str,
     unlock_description: &'static str,
     completion_quip: &'static str,
+    on_accept: Option<Box<dyn FnMut(&mut Game)>>,
     tasks: Vec<Task>,
     unlocks: Vec<usize>,
     reward_items: Vec<Item>,
@@ -785,7 +995,7 @@ struct Quest {
 enum QuestCompletion {
     Locked,
     Unlocked,
-    Accepted,
+    Accepted { on_tick: u32 },
     Finished { on_tick: u32 },
 }
 impl Default for QuestCompletion {
@@ -808,13 +1018,17 @@ impl QuestCompletion {
         }
     }
 
-    fn accepted(self) -> bool {
-        matches!(self, QuestCompletion::Accepted)
+    fn accepted(self) -> Option<u32> {
+        if let QuestCompletion::Accepted { on_tick } = self {
+            Some(on_tick)
+        } else {
+            None
+        }
     }
 
-    fn accept(&mut self) {
+    fn accept(&mut self, on_tick: u32) {
         if self.unlocked() {
-            *self = QuestCompletion::Accepted;
+            *self = QuestCompletion::Accepted { on_tick };
         }
     }
 
@@ -827,7 +1041,7 @@ impl QuestCompletion {
     }
 
     fn finish(&mut self, on_tick: u32) {
-        if self.accepted() {
+        if self.accepted().is_some() {
             *self = QuestCompletion::Finished { on_tick };
         }
     }
@@ -839,8 +1053,8 @@ impl QuestVec {
         self.0.iter_mut().enumerate().filter(|(_, q)| q.completion.unlocked())
     }
 
-    fn accepted_mut(&mut self) -> impl Iterator<Item = (usize, &mut Quest)> {
-        self.0.iter_mut().enumerate().filter(|(_, q)| q.completion.accepted())
+    fn accepted_mut(&mut self) -> impl Iterator<Item = (u32, usize, &mut Quest)> {
+        self.0.iter_mut().enumerate().filter_map(|(i, q)| Some((q.completion.accepted()?, i, q)))
     }
 
     fn finished_mut(&mut self) -> impl Iterator<Item = (u32, usize, &mut Quest)> {
@@ -851,8 +1065,8 @@ impl QuestVec {
         self.0.iter().enumerate().filter(|(_, q)| q.completion.unlocked())
     }
 
-    fn accepted(&self) -> impl Iterator<Item = (usize, &Quest)> {
-        self.0.iter().enumerate().filter(|(_, q)| q.completion.accepted())
+    fn accepted(&self) -> impl Iterator<Item = (u32, usize, &Quest)> {
+        self.0.iter().enumerate().filter_map(|(i, q)| Some((q.completion.accepted()?, i, q)))
     }
 
     fn finished(&self) -> impl Iterator<Item = (u32, usize, &Quest)> {
@@ -871,6 +1085,7 @@ pub fn open_tree<F: FnOnce(&mut megaui::Ui)>(
 
 struct Quests {
     quests: QuestVec,
+    hero_rewards: Vec<Item>,
     temp: Vec<usize>,
     tab_titles: [String; 3],
     new_tabs: [bool; 3],
@@ -880,6 +1095,7 @@ impl Quests {
     fn new() -> Self {
         Self {
             quests: QuestVec(Vec::with_capacity(100)),
+            hero_rewards: Vec::with_capacity(100),
             temp: Vec::with_capacity(100),
             tab_titles: [(); 3].map(|_| String::with_capacity(25)),
             new_tabs: [false; 3],
@@ -893,15 +1109,19 @@ impl Quests {
         i
     }
 
-    fn update(&mut self, qi: &QuestInput) -> Vec<Item> {
-        let mut rewards = vec![];
+    fn update(&mut self, g: &mut Game) {
+        for (tick, _, quest) in self.quests.accepted_mut() {
+            if tick + 1 == g.tick {
+                if let Some(f) = &mut quest.on_accept {
+                    (f)(g);
+                }
+            }
 
-        for (_, quest) in self.quests.accepted_mut() {
-            if quest.tasks.iter().all(|t| t.done(qi)) {
-                quest.completion.finish(qi.tick);
+            if quest.tasks.iter_mut().all(|t| t.done(g)) {
+                quest.completion.finish(g.tick);
                 self.jump_to_tab = Some(2);
                 self.temp.extend(quest.unlocks.iter().copied());
-                rewards.extend(quest.reward_items.iter().cloned());
+                self.hero_rewards.extend(quest.reward_items.iter().cloned());
             }
         }
 
@@ -909,11 +1129,9 @@ impl Quests {
             self.new_tabs[0] = true;
             self.quests.0[unlock].completion.unlock();
         }
-
-        rewards
     }
 
-    fn unlocked_ui(&mut self, ui: &mut megaui::Ui) {
+    fn unlocked_ui(&mut self, ui: &mut megaui::Ui, tick: u32) {
         use megaui::widgets::Label;
 
         ui.separator();
@@ -921,18 +1139,18 @@ impl Quests {
             ui.label(None, quest.title);
             Label::new(quest.unlock_description).multiline(14.0).ui(ui);
             if ui.button(None, "Accept") {
-                quest.completion.accept();
+                quest.completion.accept(tick);
                 self.new_tabs[1] = true;
             }
             ui.separator();
         }
     }
 
-    fn accepted_ui(&mut self, ui: &mut megaui::Ui, qi: &QuestInput) {
+    fn accepted_ui(&mut self, ui: &mut megaui::Ui) {
         use megaui::hash;
 
         ui.separator();
-        for (i, quest) in self.quests.accepted() {
+        for (_, i, quest) in self.quests.accepted() {
             open_tree(ui, hash!(i), quest.title, |ui| {
                 for task in &quest.tasks {
                     ui.label(None, &task.label);
@@ -985,7 +1203,7 @@ impl Quests {
         [&self.tab_titles[0], &self.tab_titles[1], &self.tab_titles[2]]
     }
 
-    fn ui(&mut self, qi: &QuestInput) {
+    fn ui(&mut self, g: &Game) {
         use megaui_macroquad::{
             draw_window,
             megaui::{
@@ -1023,8 +1241,8 @@ impl Quests {
                 Group::new(hash!(), Vector2::new(size.x(), size.y() - tab_height * 2.0))
                     .position(Vector2::new(0.0, tab_height))
                     .ui(ui, |ui| match tab {
-                        0 => self.unlocked_ui(ui),
-                        1 => self.accepted_ui(ui, qi),
+                        0 => self.unlocked_ui(ui, g.tick),
+                        1 => self.accepted_ui(ui),
                         2 => self.finished_ui(ui),
                         _ => unreachable!(),
                     });
@@ -1066,53 +1284,72 @@ struct DamageLabel {
     hp: i32,
     tick: u32,
 }
+impl DamageLabel {
+    fn end_tick(self) -> u32 {
+        self.tick + 60
+    }
+}
 
 struct DamageLabelBin {
-    labels: Vec<DamageLabel>,
+    stale: Vec<hecs::Entity>,
     text: String,
 }
 impl DamageLabelBin {
     fn new() -> Self {
-        Self { labels: Vec::with_capacity(1000), text: String::with_capacity(100) }
+        Self { stale: Vec::with_capacity(100), text: String::with_capacity(100) }
     }
 
-    fn push(&mut self, label: DamageLabel) {
-        self.labels.push(label);
+    fn update(&mut self, Game { ecs, tick, .. }: &mut Game) {
+        self.stale.extend(
+            ecs.query::<&DamageLabel>()
+                .iter()
+                .filter(|(_, dl)| *tick > dl.end_tick())
+                .map(|(e, _)| e),
+        );
+        for e in self.stale.drain(..) {
+            or_err!(ecs.despawn(e));
+        }
     }
 
-    fn draw(&mut self, tick: u32, cam: &Camera2D) {
-        let Self { labels, text, .. } = self;
+    fn draw(&mut self, Game { ecs, tick: game_tick, .. }: &Game, cam: &Camera2D) {
+        let Self { text, .. } = self;
 
-        labels.drain_filter(|l| {
-            let end_tick = l.tick + 60;
-
-            *text = l.hp.to_string();
-            let (x, y) = cam.world_to_screen(l.pos).into();
-            draw_text(text, x - 20.0, y - 120.0 - (tick - l.tick) as f32, 42.0, MAROON);
-
-            tick > end_tick
-        });
+        for (_, &DamageLabel { hp, pos, tick }) in ecs.query::<&_>().iter() {
+            *text = hp.to_string();
+            let (x, y) = cam.world_to_screen(pos).into();
+            draw_text(text, x - 20.0, y - 120.0 - (game_tick - tick) as f32, 42.0, MAROON);
+        }
     }
 }
 
 struct Drawer {
     sprites: Vec<(Vec2, Art, Option<Rot>)>,
+    damage_labels: DamageLabelBin,
     cam: Camera2D,
-    pan_cam_to: Vec2,
 }
 impl Drawer {
     fn new() -> Self {
         Self {
             sprites: Vec::with_capacity(1000),
             cam: Default::default(),
-            pan_cam_to: Vec2::zero(),
+            damage_labels: DamageLabelBin::new(),
         }
     }
 
-    fn draw(&mut self, ecs: &hecs::World) {
+    fn update(&mut self, game: &mut Game) {
+        let Self { damage_labels, cam, .. } = self;
+        damage_labels.update(game);
+        cam.target = cam.target.lerp(game.hero_pos, 0.05);
+    }
+
+    fn draw(&mut self, game: &Game) {
+        self.sprites(game);
+        self.damage_labels.draw(game, &self.cam);
+    }
+
+    fn sprites(&mut self, Game { ecs, .. }: &Game) {
         use std::cmp::Ordering::Less;
         let Self { sprites, cam, .. } = self;
-        cam.target = cam.target.lerp(self.pan_cam_to, 0.05);
         cam.zoom = vec2(1.0, screen_width() / screen_height()) / 7.8;
         set_camera(*cam);
 
@@ -1134,6 +1371,7 @@ impl Drawer {
             let (color, w, h) = match art {
                 Art::Hero => (BLUE, 1.0, 1.0),
                 Art::Scarecrow => (RED, 0.8, 0.8),
+                Art::TripletuftedTerrorworm => (WHITE, 0.8, 0.8),
                 Art::Npc => (GREEN, 1.0, GOLDEN_RATIO),
                 Art::Post => (BROWN, 0.8, GOLDEN_RATIO * 0.8),
                 Art::Sword => {
@@ -1183,8 +1421,8 @@ impl Drawer {
 
         #[cfg(feature = "show-collide")]
         system!(ecs, _,
-            Phys(circles) = &_
-            &pos          = &Vec2
+            phys = &Phys
+            &pos = &Vec2
         {
             use CircleKind::*;
 
@@ -1196,15 +1434,15 @@ impl Drawer {
                 }
             }
 
-            for &Circle(r, o, k) in circles.iter() {
+            for &Circle(r, o, k) in phys.iter() {
                 let (x, y) = (pos + o).into();
                 let mut color = kind_color(k);
                 color.0[3] = 100;
                 draw_circle(x, y, r, color);
             }
 
-            fn centroid(circles: &[Circle], kind: CircleKind) -> Vec2 {
-                let (count, sum) = circles
+            fn centroid(phys: &Phys, kind: CircleKind) -> Vec2 {
+                let (count, sum) = phys
                     .iter()
                     .filter(|&&Circle(_, _, k)| k == kind)
                     .fold((0, Vec2::zero()), |(i, acc), &Circle(_, p, ..)| (i + 1, acc + p));
@@ -1212,7 +1450,7 @@ impl Drawer {
             }
 
             for &kind in &[Push, Hit, Hurt] {
-                let (x, y) = (pos + centroid(&circles, kind)).into();
+                let (x, y) = (pos + centroid(phys, kind)).into();
                 draw_circle(x, y, 0.1, kind_color(kind));
             }
         });
