@@ -661,26 +661,24 @@ fn circle_points(n: usize) -> impl Iterator<Item = Vec2> {
 fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
     let &Game { tick, mouse_pos, .. } = &*game;
 
-    let (hero_pos, hero_wep, hero_vel, hero_dir) =
-        match game.ecs.query_one_mut::<Hero>(hero) {
-            Ok(mut hero) => {
-                hero.bag.take(quests.hero_rewards.drain(..));
-                hero.movement();
-                (*hero.pos, hero.bag.weapon, hero.vel.0, *hero.dir)
-            }
-            Err(e) => {
-                error!("no hero!? {}", e);
-                return;
-            }
-        };
+    let (hero_pos, hero_wep, hero_vel, hero_dir) = match game.ecs.query_one_mut::<Hero>(hero) {
+        Ok(mut hero) => {
+            hero.bag.take(quests.hero_rewards.drain(..));
+            hero.movement();
+            (*hero.pos, hero.bag.weapon, hero.vel.0, *hero.dir)
+        }
+        Err(e) => {
+            error!("no hero!? {}", e);
+            return;
+        }
+    };
     game.hero_pos = hero_pos;
 
     let hero_attacks = hero_wep
         .and_then(|e| game.ecs.query_one_mut::<Weapon>(e).ok())
         .map(|mut wep| {
             wep.tick(WeaponInput {
-                start_attacking: !mouse_over_ui()
-                    && is_mouse_button_down(MouseButton::Left),
+                start_attacking: !mouse_over_ui() && is_mouse_button_down(MouseButton::Left),
                 target: mouse_pos,
                 wielder_pos: hero_pos,
                 wielder_vel: hero_vel,
@@ -699,7 +697,6 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
 }
 
 struct Enemy;
-const SLOT_COUNT: usize = 7;
 struct Waffle {
     enemies: Vec<(hecs::Entity, Vec2, Velocity)>,
 }
@@ -711,12 +708,14 @@ impl Waffle {
     fn update(&mut self, game: &mut Game) {
         let &mut Game { hero_pos, tick, .. } = game;
         let Self { enemies, .. } = self;
-        enemies.extend(game.ecs.query::<(&_, &_, &Enemy)>().iter().map(|(e, (x, v, _))| (e, *x, *v)));
+        enemies
+            .extend(game.ecs.query::<(&_, &_, &Enemy)>().iter().map(|(e, (x, v, _))| (e, *x, *v)));
         enemies.sort_by(|a, b| float_cmp(a, b, |&(_, p, _)| (hero_pos - p).length_squared()));
 
+        const SLOT_COUNT: usize = 7;
         let mut slots = [false; SLOT_COUNT];
         for (e, pos, vel) in enemies.drain(..) {
-            let slot = circle_points(7)
+            let slot = circle_points(SLOT_COUNT)
                 .map(|v| (Rot(0.1).apply(v) * 1.6 + hero_pos) - pos)
                 .enumerate()
                 .filter(|&(i, _)| !slots[i])
@@ -730,7 +729,10 @@ impl Waffle {
             }
 
             if let Ok(Some(wep_ent)) = game.ecs.get::<Bag>(e).map(|b| b.weapon) {
-                let attacks = game.ecs.query_one_mut::<Weapon>(wep_ent).ok()
+                let attacks = game
+                    .ecs
+                    .query_one_mut::<Weapon>(wep_ent)
+                    .ok()
                     .map(|mut wep| {
                         wep.tick(WeaponInput {
                             start_attacking: false,
