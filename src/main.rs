@@ -85,6 +85,16 @@ impl Phys {
         Self(s)
     }
 
+    fn insert(&mut self, c: Circle) {
+        for slot in self.0.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(c);
+                return;
+            }
+        }
+        panic!("no more than five circles");
+    }
+
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut Circle> {
         self.0.iter_mut().filter_map(|s| s.as_mut())
     }
@@ -107,6 +117,11 @@ impl Phys {
             Circle(wr, vec2(-r, r), kind),
             Circle(wr, vec2(r, r), kind),
         ])
+    }
+
+    fn hurtbox(mut self, r: f32) -> Self {
+        self.insert(Circle::hit(r, vec2(0.0, r)));
+        self
     }
 }
 
@@ -667,10 +682,7 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
             hero.movement();
             (*hero.pos, hero.bag.weapon, hero.vel.0, *hero.dir)
         }
-        Err(e) => {
-            error!("no hero!? {}", e);
-            return;
-        }
+        Err(_) => return,
     };
     game.hero_pos = hero_pos;
 
@@ -699,32 +711,61 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
 struct Enemy;
 struct Waffle {
     enemies: Vec<(hecs::Entity, Vec2, Velocity)>,
+    last_attack: u32,
+    attacker: Option<hecs::Entity>,
+    occupied_slots_last_frame: usize,
 }
 impl Waffle {
     fn new() -> Self {
-        Self { enemies: Vec::with_capacity(100) }
+        Self {
+            enemies: Vec::with_capacity(100),
+            last_attack: 0,
+            attacker: None,
+            occupied_slots_last_frame: 0,
+        }
     }
 
     fn update(&mut self, game: &mut Game) {
         let &mut Game { hero_pos, tick, .. } = game;
-        let Self { enemies, .. } = self;
+        let Self { enemies, last_attack, attacker, occupied_slots_last_frame } = self;
         enemies
             .extend(game.ecs.query::<(&_, &_, &Enemy)>().iter().map(|(e, (x, v, _))| (e, *x, *v)));
-        enemies.sort_by(|a, b| float_cmp(a, b, |&(_, p, _)| (hero_pos - p).length_squared()));
+        enemies.sort_by(|a, b| {
+            if Some(a.0) == *attacker {
+                std::cmp::Ordering::Less
+            } else {
+                float_cmp(a, b, |&(_, p, _)| (hero_pos - p).length_squared())
+            }
+        });
 
         const SLOT_COUNT: usize = 7;
         let mut slots = [false; SLOT_COUNT];
         for (e, pos, vel) in enemies.drain(..) {
             let slot = circle_points(SLOT_COUNT)
-                .map(|v| (Rot(0.1).apply(v) * 1.6 + hero_pos) - pos)
+                .map(|v| (Rot(0.1).apply(v) * 2.65 + hero_pos) - pos)
                 .enumerate()
                 .filter(|&(i, _)| !slots[i])
                 .min_by(|a, b| float_cmp(a, b, |d| d.1.length_squared()));
 
             if let Some((i, delta)) = slot {
                 slots[i] = true;
+
+                if *last_attack + 80 < tick
+                    && (Some(e) != *attacker || *occupied_slots_last_frame == 1)
+                {
+                    *attacker = Some(e);
+                    *last_attack = tick;
+                }
+
                 if let Ok(Velocity(vel)) = game.ecs.get_mut(e).as_deref_mut() {
-                    *vel += delta * 0.0035;
+                    let (d, speed) = if Some(e) == *attacker && *last_attack + 40 > tick {
+                        let goal = hero_pos + (pos - hero_pos).normalize() * 2.0;
+                        ((goal - pos), 0.0085)
+                    } else {
+                        (delta, 0.0065)
+                    };
+
+                    *vel += d.min(d.normalize()) * speed;
                 }
             }
 
@@ -735,7 +776,7 @@ impl Waffle {
                     .ok()
                     .map(|mut wep| {
                         wep.tick(WeaponInput {
-                            start_attacking: false,
+                            start_attacking: *attacker == Some(e) && *last_attack == tick,
                             target: hero_pos,
                             wielder_pos: pos,
                             wielder_vel: vel.0,
@@ -751,6 +792,7 @@ impl Waffle {
                 }
             }
         }
+        *occupied_slots_last_frame = slots.iter().filter(|&&s| s).count();
     }
 }
 
@@ -769,9 +811,10 @@ async fn main() {
     let hero = ecs.spawn((
         Vec2::unit_x() * -2.5,
         Velocity(Vec2::zero()),
-        Phys::wings(0.3, 0.21, CircleKind::Push),
+        Phys::wings(0.3, 0.21, CircleKind::Push).hurtbox(0.5),
         Art::Hero,
         Direction::Left,
+        Health(10),
         Bag::default(),
     ));
 
@@ -832,7 +875,7 @@ async fn main() {
                 Velocity(Vec2::zero()),
                 Innocence::Unwavering,
                 Phys::pushfoot_bighit(),
-                Health(1),
+                Health(2),
             ))
         })
     };
@@ -1164,6 +1207,7 @@ pub fn open_tree<F: FnOnce(&mut megaui::Ui)>(
 
 struct Quests {
     quests: QuestVec,
+    auto_accept: bool,
     hero_rewards: Vec<Item>,
     temp: Vec<usize>,
     tab_titles: [String; 3],
@@ -1174,6 +1218,7 @@ impl Quests {
     fn new() -> Self {
         Self {
             quests: QuestVec(Vec::with_capacity(100)),
+            auto_accept: true,
             hero_rewards: Vec::with_capacity(100),
             temp: Vec::with_capacity(100),
             tab_titles: [(); 3].map(|_| String::with_capacity(25)),
@@ -1189,6 +1234,12 @@ impl Quests {
     }
 
     fn update(&mut self, g: &mut Game) {
+        if self.auto_accept {
+            for (_, quest) in self.quests.unlocked_mut() {
+                quest.completion.accept(g.tick);
+            }
+        }
+
         for (tick, _, quest) in self.quests.accepted_mut() {
             if tick + 1 == g.tick {
                 if let Some(f) = &mut quest.on_accept {
@@ -1212,6 +1263,11 @@ impl Quests {
 
     fn unlocked_ui(&mut self, ui: &mut megaui::Ui, tick: u32) {
         use megaui::widgets::Label;
+
+        if ui.button(None, ["Enable Auto-Accept", "Disable Auto-Accept"][self.auto_accept as usize])
+        {
+            self.auto_accept = !self.auto_accept;
+        }
 
         ui.separator();
         for (_, quest) in self.quests.unlocked_mut() {
