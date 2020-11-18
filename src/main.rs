@@ -875,7 +875,7 @@ async fn main() {
                 Velocity(Vec2::zero()),
                 Innocence::Unwavering,
                 Phys::pushfoot_bighit(),
-                Health(2),
+                Health(1),
             ))
         })
     };
@@ -927,7 +927,7 @@ async fn main() {
                         drop(g.ecs.remove_one::<Wander>(tw));
                         let mut bag = Bag::default();
                         bag.take(std::iter::once(Item::sword()));
-                        drop(g.ecs.insert(tw, (Enemy, bag)));
+                        drop(g.ecs.insert(tw, (Enemy, bag, Health(2))));
                     }
                 }),
                 ..Default::default()
