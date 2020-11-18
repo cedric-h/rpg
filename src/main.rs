@@ -39,6 +39,13 @@ fn float_cmp<T>(a: T, b: T, mut f: impl FnMut(T) -> f32) -> std::cmp::Ordering {
 
 #[derive(Debug, Copy, Clone)]
 struct Velocity(Vec2);
+impl Velocity {
+    fn knockback(&mut self, delta: Vec2, force: f32) {
+        if delta.length_squared() > 0.0 {
+            self.0 += delta.normalize() * force;
+        }
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum CircleKind {
@@ -52,7 +59,6 @@ impl CircleKind {
         match (self, o) {
             (Push, Push) => true,
             (Hurt, Hit) => true,
-            (Hit, Hurt) => true,
             _ => false,
         }
     }
@@ -265,17 +271,15 @@ struct Bag {
     slots: [Option<Item>; 3],
 }
 impl Bag {
-    fn take(&mut self, items: impl Iterator<Item = Item>) {
-        for item in items {
-            if self.weapon.is_none() && self.temp_weapon.is_none() {
-                self.temp_weapon = Some(item);
+    fn take(&mut self, item: Item) {
+        if self.weapon.is_none() && self.temp_weapon.is_none() {
+            self.temp_weapon = Some(item);
+        } else {
+            let empty_slot = self.slots.iter_mut().find(|s| s.is_none());
+            if let Some(slot) = empty_slot {
+                *slot = Some(item);
             } else {
-                let empty_slot = self.slots.iter_mut().find(|s| s.is_none());
-                if let Some(slot) = empty_slot {
-                    *slot = Some(item);
-                } else {
-                    dbg!("lmao ignoring item");
-                }
+                dbg!("lmao ignoring item");
             }
         }
     }
@@ -307,6 +311,11 @@ struct WeaponState {
     last_rot: Rot,
     attack: Attack,
     ents_hit: smallvec::SmallVec<[hecs::Entity; 5]>,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct WeaponHit {
+    hit: hecs::Entity,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -371,19 +380,19 @@ impl Weapon<'_> {
         }
     }
 
-    fn ent_hits(&mut self) -> smallvec::SmallVec<[hecs::Entity; 5]> {
+    fn attack_hits(&mut self) -> smallvec::SmallVec<[WeaponHit; 5]> {
         match self.wep.attack {
             Attack::Swing(s) if s.doing_damage => self
                 .contacts
                 .0
                 .iter()
-                .filter(|h| matches!(h.circle_kinds[0], CircleKind::Hurt | CircleKind::Hit))
-                .map(|h| h.hit)
-                .filter(|e| {
-                    if self.wep.ents_hit.contains(e) {
+                .filter(|h| matches!(h.circle_kinds, [CircleKind::Hurt, CircleKind::Hit]))
+                .map(|h| WeaponHit { hit: h.hit })
+                .filter(|wh| {
+                    if self.wep.ents_hit.contains(&wh.hit) {
                         false
                     } else {
-                        self.wep.ents_hit.push(*e);
+                        self.wep.ents_hit.push(wh.hit);
                         true
                     }
                 })
@@ -391,6 +400,28 @@ impl Weapon<'_> {
             _ => Default::default(),
         }
     }
+
+    /*
+    fn environmental_hits(&self) -> Vec2 {
+        match self.wep.attack {
+            Attack::Swing(s) if s.doing_damage => self
+                .contacts
+                .0
+                .iter()
+                .filter(|h| matches!(h.circle_kinds[0], CircleKind::Hurt | CircleKind::Hit))
+                .map(|h| WeaponHit { hit: h.hit })
+                .filter(|wh| {
+                    if self.wep.ents_hit.contains(&wh.hit) {
+                        false
+                    } else {
+                        self.wep.ents_hit.push(wh.hit);
+                        true
+                    }
+                })
+                .collect(),
+            _ => Default::default(),
+        }
+    }*/
 
     fn rest(
         &mut self,
@@ -678,7 +709,7 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
 
     let (hero_pos, hero_wep, hero_vel, hero_dir) = match game.ecs.query_one_mut::<Hero>(hero) {
         Ok(mut hero) => {
-            hero.bag.take(quests.hero_rewards.drain(..));
+            for i in quests.hero_rewards.drain(..) { hero.bag.take(i) };
             hero.movement();
             (*hero.pos, hero.bag.weapon, hero.vel.0, *hero.dir)
         }
@@ -697,14 +728,20 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
                 wielder_dir: hero_dir,
                 tick,
             });
-            wep.ent_hits()
+            wep.attack_hits()
         })
         .unwrap_or_default();
 
+    let mut knockback = Vec2::zero();
     for &hit in &hero_attacks {
-        if game.hit(hit) {
+        let (dead, vel) = game.hit(hero_pos, hit);
+        knockback += vel;
+        if dead {
             quests.update(game);
         }
+    }
+    if let Ok(mut v) = game.ecs.get_mut::<Velocity>(hero) {
+        v.knockback(knockback, 0.125);
     }
 }
 
@@ -783,12 +820,17 @@ impl Waffle {
                             wielder_dir: (hero_pos - pos).x().into(),
                             tick,
                         });
-                        wep.ent_hits()
+                        wep.attack_hits()
                     })
                     .unwrap_or_default();
 
+                let mut knockback = Vec2::zero();
                 for &hit in &attacks {
-                    game.hit(hit);
+                    let (_, vel) = game.hit(pos, hit);
+                    knockback += vel;
+                }
+                if let Ok(mut v) = game.ecs.get_mut::<Velocity>(wep_ent) {
+                    v.knockback(knockback, 0.125);
                 }
             }
         }
@@ -926,7 +968,7 @@ async fn main() {
                         drop(g.innocent_for(tw, 10));
                         drop(g.ecs.remove_one::<Wander>(tw));
                         let mut bag = Bag::default();
-                        bag.take(std::iter::once(Item::sword()));
+                        bag.take(Item::sword());
                         drop(g.ecs.insert(tw, (Enemy, bag, Health(2))));
                     }
                 }),
@@ -1053,14 +1095,18 @@ impl Game {
     }
 
     /// Returns true if they died
-    fn hit(&mut self, hit: hecs::Entity) -> bool {
+    fn hit(&mut self, hitter_pos: Vec2, WeaponHit { hit }: WeaponHit) -> (bool, Vec2) {
         let tick = self.tick;
 
-        if let Ok((Health(hp), &pos, innocence)) =
-            self.ecs.query_one_mut::<(&mut _, &_, Option<&Innocence>)>(hit)
+        if let Ok((Health(hp), vel, &pos, ino)) =
+            self.ecs.query_one_mut::<(&mut _, Option<&mut Velocity>, &Vec2, Option<&Innocence>)>(hit)
         {
-            if let Some(true) = innocence.map(|i| i.active(tick)) {
-                return false;
+            if let Some(true) = ino.map(|i| i.active(tick)) {
+                return (false, Vec2::zero())
+            }
+
+            if let Some(v) = vel {
+                v.knockback(pos - hitter_pos, 0.2);
             }
 
             *hp -= 1;
@@ -1070,9 +1116,9 @@ impl Game {
             }
             self.ecs.spawn((DamageLabel { tick, hp: -1, pos },));
 
-            dead
+            (dead, (hitter_pos - pos).normalize())
         } else {
-            false
+            (false, Vec2::zero())
         }
     }
 }
