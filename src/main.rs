@@ -271,6 +271,11 @@ struct Bag {
     slots: [Option<Item>; 3],
 }
 impl Bag {
+    fn holding(item: Item) -> Self {
+        let mut me = Self::default();
+        me.take(item);
+        me
+    }
     fn take(&mut self, item: Item) {
         if self.weapon.is_none() && self.temp_weapon.is_none() {
             self.temp_weapon = Some(item);
@@ -287,30 +292,53 @@ impl Bag {
 
 struct KeeperOfBags {
     temp: Vec<(hecs::Entity, Item)>,
+    ownerless: Vec<hecs::Entity>,
 }
 impl KeeperOfBags {
     fn new() -> Self {
-        Self { temp: Vec::with_capacity(100) }
+        Self { temp: Vec::with_capacity(100), ownerless: Vec::with_capacity(100) }
     }
 
     fn keep(&mut self, ecs: &mut hecs::World) {
-        self.temp.extend(ecs.query::<&mut Bag>().iter().filter_map(|(_, b)| {
+        let Self { temp, ownerless } = self;
+        temp.extend(ecs.query::<&mut Bag>().iter().filter_map(|(_, b)| {
             let w = b.temp_weapon.take()?;
             let e = ecs.reserve_entity();
             b.weapon = Some(e);
             Some((e, w))
         }));
-        for (ent, weapon) in self.temp.drain(..) {
+        for (ent, weapon) in temp.drain(..) {
             or_err!(ecs.insert(ent, weapon));
+        }
+
+        ownerless.extend(
+            ecs.query::<&WeaponState>()
+                .iter()
+                .filter(|(_, w)| !ecs.contains(w.owner))
+                .map(|(e, _)| e),
+        );
+        for w in ownerless.drain(..) {
+            or_err!(ecs.despawn(w));
         }
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct WeaponState {
     last_rot: Rot,
+    owner: hecs::Entity,
     attack: Attack,
     ents_hit: smallvec::SmallVec<[hecs::Entity; 5]>,
+}
+impl WeaponState {
+    fn new(owner: hecs::Entity) -> Self {
+        Self {
+            owner,
+            last_rot: Default::default(),
+            attack: Default::default(),
+            ents_hit: Default::default(),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -648,7 +676,7 @@ struct Item {
     contacts: Contacts,
 }
 impl Item {
-    fn sword() -> Self {
+    fn sword(owner: hecs::Entity) -> Self {
         Self {
             pos: Vec2::zero(),
             art: Art::Sword,
@@ -659,7 +687,7 @@ impl Item {
                 Circle::hurt(0.15, vec2(0.0, 0.85)),
                 Circle::hurt(0.125, vec2(0.0, 0.65)),
             ]),
-            wep: WeaponState::default(),
+            wep: WeaponState::new(owner),
             contacts: Contacts::default(),
         }
     }
@@ -709,7 +737,6 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
 
     let (hero_pos, hero_wep, hero_vel, hero_dir) = match game.ecs.query_one_mut::<Hero>(hero) {
         Ok(mut hero) => {
-            for i in quests.hero_rewards.drain(..) { hero.bag.take(i) };
             hero.movement();
             (*hero.pos, hero.bag.weapon, hero.vel.0, *hero.dir)
         }
@@ -732,20 +759,19 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
         })
         .unwrap_or_default();
 
-    let mut knockback = Vec2::zero();
-    for &hit in &hero_attacks {
+    let knockback = hero_attacks.iter().fold(Vec2::zero(), |acc, &hit| {
         let (dead, vel) = game.hit(hero_pos, hit);
-        knockback += vel;
         if dead {
             quests.update(game);
         }
-    }
+        acc + vel
+    });
     if let Ok(mut v) = game.ecs.get_mut::<Velocity>(hero) {
         v.knockback(knockback, 0.125);
     }
 }
 
-struct Enemy;
+struct Fighter;
 struct Waffle {
     enemies: Vec<(hecs::Entity, Vec2, Velocity)>,
     last_attack: u32,
@@ -766,7 +792,7 @@ impl Waffle {
         let &mut Game { hero_pos, tick, .. } = game;
         let Self { enemies, last_attack, attacker, occupied_slots_last_frame } = self;
         enemies
-            .extend(game.ecs.query::<(&_, &_, &Enemy)>().iter().map(|(e, (x, v, _))| (e, *x, *v)));
+            .extend(game.ecs.query::<(&_, &_, &Fighter)>().iter().map(|(e, (x, v, _))| (e, *x, *v)));
         enemies.sort_by(|a, b| {
             if Some(a.0) == *attacker {
                 std::cmp::Ordering::Less
@@ -824,11 +850,10 @@ impl Waffle {
                     })
                     .unwrap_or_default();
 
-                let mut knockback = Vec2::zero();
-                for &hit in &attacks {
-                    let (_, vel) = game.hit(pos, hit);
-                    knockback += vel;
-                }
+                let knockback = attacks.iter().fold(Vec2::zero(), |acc, &hit| {
+                    let (_, vel) = game.hit(hero_pos, hit);
+                    acc + vel
+                });
                 if let Ok(mut v) = game.ecs.get_mut::<Velocity>(wep_ent) {
                     v.knockback(knockback, 0.125);
                 }
@@ -907,39 +932,65 @@ async fn main() {
     let npc2 = ecs.spawn(npc(vec2(4.0, 11.0)));
     let pen = Pen::new(&mut ecs);
     let (pen_pos, pen_radius) = (pen.pos, pen.radius);
-    let terrorworms = {
-        let mut circle = circle_points(6);
-        [(); 6].map(|_| {
-            ecs.spawn((
-                circle.next().unwrap() * 2.0 + pen.pos,
-                Art::TripletuftedTerrorworm,
-                Wander::around(pen.pos, pen.radius * 0.4),
-                Velocity(Vec2::zero()),
-                Innocence::Unwavering,
-                Phys::pushfoot_bighit(),
-                Health(1),
-            ))
-        })
-    };
+    #[derive(Copy, Clone)]
+    struct Terrorworms([hecs::Entity; 6]);
+    impl Terrorworms {
+        fn new(ecs: &mut hecs::World, pen: Pen) -> Self {
+            let r = pen.radius * 0.4;
+            let mut circle = circle_points(6);
+            Terrorworms([(); 6].map(|_| {
+                ecs.spawn((
+                    circle.next().unwrap() * r * 0.3 + pen.pos,
+                    Art::TripletuftedTerrorworm,
+                    Wander::around(pen.pos, r),
+                    Velocity(Vec2::zero()),
+                    Innocence::Unwavering,
+                    Phys::pushfoot_bighit(),
+                    Health(1),
+                ))
+            }))
+        }
 
-    let rpg_tropes_4 = quests.add(Quest {
-        title: "RPG Tropes IV - Tripletufted Terrorworms",
-        completion_quip: "Of course they just come back ... you need a Honeycoated Heptahorn!",
+        fn living(&self, g: &Game) -> usize {
+            self.0.iter().filter(|&&e| !g.dead(e)).count()
+        }
+        
+        fn dead(&self, g: &Game) -> usize {
+            self.0.iter().filter(|&&e| g.dead(e)).count()
+        }
+
+        /// Note: now all of the entities are invalid, only do this
+        /// when all the existing ones are dead, you want 6 more, and
+        /// you won't be fiddling with them after this.
+        fn refill(&self, g: &mut Game, pen: Pen) {
+            Self::new(&mut g.ecs, pen);
+        }
+    }
+    let terrorworms = Terrorworms::new(&mut ecs, pen);
+
+    let rpg_tropes_3 = quests.add(Quest {
+        title: "RPG Tropes III - Tripletufted Terrorworms",
+        completion_quip: "Of course they just come back ... we need a Honeycoated Heptahorn!",
         unlock_description: concat!(
-            "Oh, adventurer, I'm so glad you've come along! \n",
-            "In fact, it's almost like I've just been standing here since \n",
-            "the dawn of time itself, waiting for someone to come help me. In fact, \n",
-            "it's almost as if I was created simply to give you something to do. \n",
-            "In this pen are the last Tripletufted Terrorworms known to exist, and \n",
-            "I need you to forgo your conscience and simply slaughter them: no remorse.",
+            "As you have proven yourself capable of obliterating inanimate \n",
+            "objects which are rarely fearsome enough even to repel birds \n",
+            "characterized by their extreme cowardice, any doubts I may have had \n",
+            "about your ability to spare us from certain doom are certainly assuaged. \n",
+            "I urge you to talk to NPC 2, who will open the gate for you. Once inside \n",
+            "the pen, attempt to slaughter the innocent looking creatures inside.",
         ),
-        on_accept: Some(Box::new(move |g| pen.gate_open(&mut g.ecs))),
         tasks: vec![
+            Task {
+                label: "Talk to NPC 2",
+                req: Box::new(move |g| g.hero_dist_ent(npc2) < 1.3),
+                on_finish: Box::new(move |g| pen.gate_open(&mut g.ecs)),
+                ..Default::default()
+            },
             Task {
                 label: "Enter the Pen",
                 req: Box::new(move |g| g.hero_dist(pen_pos) < pen_radius * 0.9),
                 on_finish: Box::new(move |g| {
-                    for &tw in &terrorworms {
+                    for &tw in &terrorworms.0 {
                         drop(g.innocent_for(tw, 1));
                     }
                     pen.gate_close(&mut g.ecs)
@@ -948,9 +999,9 @@ async fn main() {
             },
             Task {
                 label: "Slaughter the first one",
-                req: Box::new(move |g| terrorworms.iter().filter(|&&e| g.dead(e)).count() == 1),
+                req: Box::new(move |g| terrorworms.dead(g) == 1),
                 on_finish: Box::new(move |g| {
-                    for &tw in &terrorworms {
+                    for &tw in &terrorworms.0 {
                         drop(g.innocent_for(tw, 10));
                         if let Ok(Wander { goal, speed, .. }) = g.ecs.get_mut(tw).as_deref_mut() {
                             *goal = rand_vec2() * pen_radius + pen_pos;
@@ -961,38 +1012,27 @@ async fn main() {
                 ..Default::default()
             },
             Task {
-                label: "Slaughter the second one",
-                req: Box::new(move |g| terrorworms.iter().filter(|&&e| g.dead(e)).count() == 2),
+                label: "Shit boutta get real",
+                req: Box::new(move |g| terrorworms.dead(g) == 2),
                 on_finish: Box::new(move |g| {
-                    for &tw in &terrorworms {
+                    for &tw in &terrorworms.0 {
                         drop(g.innocent_for(tw, 10));
                         drop(g.ecs.remove_one::<Wander>(tw));
-                        let mut bag = Bag::default();
-                        bag.take(Item::sword());
-                        drop(g.ecs.insert(tw, (Enemy, bag, Health(2))));
+                        drop(g.ecs.insert(tw, (Fighter, Bag::holding(Item::sword(tw)), Health(2))));
                     }
                 }),
                 ..Default::default()
             },
+            Task {
+                label: "Kill them all!",
+                req: Box::new(move |g| terrorworms.living(g) == 0),
+                on_finish: Box::new(move |g| {
+                    pen.gate_open(&mut g.ecs);
+                    terrorworms.refill(g, pen);
+                }),
+                ..Default::default()
+            }
         ],
-        ..Default::default()
-    });
-
-    let rpg_tropes_3 = quests.add(Quest {
-        title: "RPG Tropes III - Couriers",
-        completion_quip: "Save us from impending doom! But first, give this to my girlfriend.",
-        unlock_description: concat!(
-            "I'm happy to say that you've come to the part of your journey where \n",
-            "I must bid you adieu and direct you to another clueless, doddering NPC. \n",
-            "So long adventurer, and thanks for nothing! \n\n",
-            "P.S. Don't forget to save me from certain doom!",
-        ),
-        tasks: vec![Task {
-            label: "Talk to NPC 2",
-            req: Box::new(move |g| g.hero_dist_ent(npc2) < 1.3),
-            ..Default::default()
-        }],
-        unlocks: vec![rpg_tropes_4],
         ..Default::default()
     });
 
@@ -1029,7 +1069,11 @@ async fn main() {
             "of whether or not you spend three hours immersed in a fishing minigame.",
         ),
         unlocks: vec![rpg_tropes_2],
-        reward_items: vec![Item::sword()],
+        tasks: vec![Task {
+            label: "Exist",
+            on_finish: Box::new(move |g| or_err!(g.give_item(hero, Item::sword(hero)))),
+            ..Default::default()
+        }],
         completion: QuestCompletion::Unlocked,
         ..Default::default()
     });
@@ -1094,15 +1138,22 @@ impl Game {
         self.ecs.insert_one(e, Innocence::Expires(ends))
     }
 
-    /// Returns true if they died
+    fn give_item(&mut self, e: hecs::Entity, item: Item) -> Result<(), hecs::ComponentError> {
+        self.ecs.get_mut::<Bag>(e)?.take(item);
+        Ok(())
+    }
+
+    /// The tuple's first field is true if they died,
+    /// the second field represents knockback.
     fn hit(&mut self, hitter_pos: Vec2, WeaponHit { hit }: WeaponHit) -> (bool, Vec2) {
         let tick = self.tick;
 
         if let Ok((Health(hp), vel, &pos, ino)) =
-            self.ecs.query_one_mut::<(&mut _, Option<&mut Velocity>, &Vec2, Option<&Innocence>)>(hit)
+            self.ecs
+                .query_one_mut::<(&mut _, Option<&mut Velocity>, &Vec2, Option<&Innocence>)>(hit)
         {
             if let Some(true) = ino.map(|i| i.active(tick)) {
-                return (false, Vec2::zero())
+                return (false, Vec2::zero());
             }
 
             if let Some(v) = vel {
@@ -1152,10 +1203,8 @@ struct Quest {
     title: &'static str,
     unlock_description: &'static str,
     completion_quip: &'static str,
-    on_accept: Option<Box<dyn FnMut(&mut Game)>>,
     tasks: Vec<Task>,
     unlocks: Vec<usize>,
-    reward_items: Vec<Item>,
     completion: QuestCompletion,
 }
 
@@ -1254,7 +1303,6 @@ pub fn open_tree<F: FnOnce(&mut megaui::Ui)>(
 struct Quests {
     quests: QuestVec,
     auto_accept: bool,
-    hero_rewards: Vec<Item>,
     temp: Vec<usize>,
     tab_titles: [String; 3],
     new_tabs: [bool; 3],
@@ -1264,8 +1312,7 @@ impl Quests {
     fn new() -> Self {
         Self {
             quests: QuestVec(Vec::with_capacity(100)),
-            auto_accept: true,
-            hero_rewards: Vec::with_capacity(100),
+            auto_accept: false,
             temp: Vec::with_capacity(100),
             tab_titles: [(); 3].map(|_| String::with_capacity(25)),
             new_tabs: [false; 3],
@@ -1286,18 +1333,11 @@ impl Quests {
             }
         }
 
-        for (tick, _, quest) in self.quests.accepted_mut() {
-            if tick + 1 == g.tick {
-                if let Some(f) = &mut quest.on_accept {
-                    (f)(g);
-                }
-            }
-
+        for (_, _, quest) in self.quests.accepted_mut() {
             if quest.tasks.iter_mut().all(|t| t.done(g)) {
                 quest.completion.finish(g.tick);
                 self.jump_to_tab = Some(2);
                 self.temp.extend(quest.unlocks.iter().copied());
-                self.hero_rewards.extend(quest.reward_items.iter().cloned());
             }
         }
 
@@ -1348,11 +1388,6 @@ impl Quests {
         for (i, _, quest) in self.quests.finished() {
             open_tree(ui, hash!(i), quest.title, |ui| {
                 ui.label(None, quest.completion_quip);
-                open_tree(ui, hash!(i, "r"), "Rewards", |ui| {
-                    for item in &quest.reward_items {
-                        ui.label(None, &format!("{:#?}", item.art));
-                    }
-                });
                 ui.tree_node(hash!(i, "u"), "Unlock Text", |ui| {
                     Label::new(quest.unlock_description).multiline(14.0).ui(ui);
                 });
