@@ -664,7 +664,10 @@ impl Innocence {
 }
 
 #[derive(Copy, Clone, Debug)]
-struct Health(u32);
+struct Health(u32, u32);
+
+#[derive(Copy, Clone, Debug)]
+struct HealthBar;
 
 #[derive(hecs::Bundle, Clone, Debug)]
 struct Item {
@@ -791,8 +794,9 @@ impl Waffle {
     fn update(&mut self, game: &mut Game) {
         let &mut Game { hero_pos, tick, .. } = game;
         let Self { enemies, last_attack, attacker, occupied_slots_last_frame } = self;
-        enemies
-            .extend(game.ecs.query::<(&_, &_, &Fighter)>().iter().map(|(e, (x, v, _))| (e, *x, *v)));
+        enemies.extend(
+            game.ecs.query::<(&_, &_, &Fighter)>().iter().map(|(e, (x, v, _))| (e, *x, *v)),
+        );
         enemies.sort_by(|a, b| {
             if Some(a.0) == *attacker {
                 std::cmp::Ordering::Less
@@ -881,7 +885,7 @@ async fn main() {
         Phys::wings(0.3, 0.21, CircleKind::Push).hurtbox(0.5),
         Art::Hero,
         Direction::Left,
-        Health(10),
+        Health(10, 10),
         Bag::default(),
     ));
 
@@ -946,7 +950,7 @@ async fn main() {
                     Velocity(Vec2::zero()),
                     Innocence::Unwavering,
                     Phys::pushfoot_bighit(),
-                    Health(1),
+                    Health(1, 1),
                 ))
             }))
         }
@@ -954,7 +958,7 @@ async fn main() {
         fn living(&self, g: &Game) -> usize {
             self.0.iter().filter(|&&e| !g.dead(e)).count()
         }
-        
+
         fn dead(&self, g: &Game) -> usize {
             self.0.iter().filter(|&&e| g.dead(e)).count()
         }
@@ -968,16 +972,33 @@ async fn main() {
     }
     let terrorworms = Terrorworms::new(&mut ecs, pen);
 
+    let rpg_tropes_4 = quests.add(Quest {
+        title: "RPG Tropes IV - Honeycoated Heptahorns",
+        completion_quip: "damn son",
+        unlock_description: concat!(
+            "Your admirable conduct has confirmed our prophecies. The slaughtered \n",
+            "Tripletufted Terrorworms have simply returned. They will continue to \n",
+            "grow in number until this pen, and eventually our simple way of life, \n",
+            "is consumed by them. It is fortold that the only way we can stop them \n",
+            "is by forging the Honeycoated Heptahorn. \n",
+            "In order to craft one, we will need a number of live bees, but naturally, \n",
+            "the only bug net in the village has has been stolen by the Spider Queen, \n",
+            "who guards it in her lair."
+        ),
+        ..Default::default()
+    });
+
     let rpg_tropes_3 = quests.add(Quest {
         title: "RPG Tropes III - Tripletufted Terrorworms",
         completion_quip: "Of course they just come back ... we need a Honeycoated Heptahorn!",
         unlock_description: concat!(
             "As you have proven yourself capable of obliterating inanimate \n",
             "objects which are rarely fearsome enough even to repel birds \n",
-            "characterized by their extreme cowardice, any doubts I may have had \n",
-            "about your ability to spare us from certain doom are certainly assuaged. \n",
+            "characterized by their extreme cowardice, any doubts I may have had as \n",
+            "to your ability to save us from inescapable doom are certainly assuaged. \n",
             "I urge you to talk to NPC 2, who will open the gate for you. Once inside \n",
-            "the pen, attempt to slaughter the innocent looking creatures inside.",
+            "the pen, attempt to slaughter the innocent looking creatures inside. \n",
+            "Show no remorse, adventurer. Soon our plight will be known to you.",
         ),
         tasks: vec![
             Task {
@@ -988,7 +1009,7 @@ async fn main() {
             },
             Task {
                 label: "Enter the Pen",
-                req: Box::new(move |g| g.hero_dist(pen_pos) < pen_radius * 0.9),
+                req: Box::new(move |g| g.hero_dist(pen_pos) < pen_radius * 0.8),
                 on_finish: Box::new(move |g| {
                     for &tw in &terrorworms.0 {
                         drop(g.innocent_for(tw, 1));
@@ -1018,7 +1039,10 @@ async fn main() {
                     for &tw in &terrorworms.0 {
                         drop(g.innocent_for(tw, 10));
                         drop(g.ecs.remove_one::<Wander>(tw));
-                        drop(g.ecs.insert(tw, (Fighter, Bag::holding(Item::sword(tw)), Health(2))));
+                        drop(g.ecs.insert(
+                            tw,
+                            (Fighter, Bag::holding(Item::sword(tw)), Health(2, 2), HealthBar),
+                        ));
                     }
                 }),
                 ..Default::default()
@@ -1026,19 +1050,31 @@ async fn main() {
             Task {
                 label: "Kill them all!",
                 req: Box::new(move |g| terrorworms.living(g) == 0),
+                on_finish: Box::new(move |g| pen.gate_open(&mut g.ecs)),
+                ..Default::default()
+            },
+            Task {
+                label: "Exit the Pen",
+                req: Box::new(move |g| g.hero_dist(pen_pos) > pen_radius * 1.2),
                 on_finish: Box::new(move |g| {
-                    pen.gate_open(&mut g.ecs);
                     terrorworms.refill(g, pen);
+                    pen.gate_close(&mut g.ecs)
                 }),
                 ..Default::default()
-            }
+            },
         ],
+        unlocks: vec![rpg_tropes_4],
         ..Default::default()
     });
 
     ecs.spawn(npc(vec2(-4.0, 0.0)));
-    let scarecrow =
-        ecs.spawn((vec2(3.4, -0.4), Phys::pushfoot_bighit(), Health(5), Art::Scarecrow));
+    let scarecrow = ecs.spawn((
+        vec2(3.4, -0.4),
+        Phys::pushfoot_bighit(),
+        Health(5, 5),
+        HealthBar,
+        Art::Scarecrow,
+    ));
     let rpg_tropes_2 = quests.add(Quest {
         title: "RPG Tropes II - Scarecrows",
         completion_quip: "My wife and children -- who probably don't even exist -- thank you!",
@@ -1102,6 +1138,11 @@ async fn main() {
         }
 
         drawer.draw(&game);
+        if let Ok(&Health(hp, max)) = game.ecs.get(hero).as_deref() {
+            let screen = vec2(screen_width(), screen_height());
+            let size = vec2(screen.x() * (1.0 / 6.0), 30.0);
+            health_bar(size, hp, max, vec2(size.x() / 2.0 + 30.0, 70.0));
+        }
 
         quests.ui(&game);
         megaui_macroquad::draw_megaui();
@@ -1148,7 +1189,7 @@ impl Game {
     fn hit(&mut self, hitter_pos: Vec2, WeaponHit { hit }: WeaponHit) -> (bool, Vec2) {
         let tick = self.tick;
 
-        if let Ok((Health(hp), vel, &pos, ino)) =
+        if let Ok((Health(hp, _), vel, &pos, ino)) =
             self.ecs
                 .query_one_mut::<(&mut _, Option<&mut Velocity>, &Vec2, Option<&Innocence>)>(hit)
         {
@@ -1490,7 +1531,7 @@ impl Fps {
     }
 
     fn draw(&self) {
-        draw_text(&self.average().to_string(), 0.0, 0.0, 30.0, BLACK);
+        draw_text(&self.average().to_string(), screen_width() - 80.0, 0.0, 30.0, BLACK);
     }
 }
 
@@ -1538,6 +1579,33 @@ impl DamageLabelBin {
     }
 }
 
+fn health_bar(size: Vec2, hp: u32, max: u32, pos: Vec2) {
+    fn lerp_color(Color(a): Color, Color(b): Color, t: f32) -> Color {
+        pub fn lerp(a: u8, b: u8, t: f32) -> u8 {
+            a + (((b - a) as f32 / 255.0 * t) * 255.0) as u8
+        }
+        Color([
+            lerp(a[0], b[0], t),
+            lerp(a[1], b[1], t),
+            lerp(a[2], b[2], t),
+            lerp(a[3], b[3], t),
+        ])
+    }
+
+    let (x, y) = (pos - size * vec2(0.5, 1.4)).into();
+    let (w, h) = size.into();
+    let ratio = hp as f32 / max as f32;
+    let mut color = if ratio < 0.5 {
+        lerp_color(RED, YELLOW, ratio)
+    } else {
+        lerp_color(YELLOW, GREEN, ratio)
+    };
+    color.0[3] = 150;
+    draw_rectangle_lines(x, y, w, h, size.y() * 0.3, color);
+    color.0[3] = 100;
+    draw_rectangle(x, y, w * ratio, h, color);
+}
+
 struct Drawer {
     sprites: Vec<(Vec2, Art, Option<Rot>)>,
     damage_labels: DamageLabelBin,
@@ -1555,11 +1623,12 @@ impl Drawer {
     fn update(&mut self, game: &mut Game) {
         let Self { damage_labels, cam, .. } = self;
         damage_labels.update(game);
-        cam.target = cam.target.lerp(game.hero_pos, 0.05);
+        cam.target = cam.target.lerp(game.hero_pos + vec2(0.0, 0.5), 0.05);
     }
 
     fn draw(&mut self, game: &Game) {
         self.sprites(game);
+
         self.damage_labels.draw(game, &self.cam);
     }
 
@@ -1584,7 +1653,14 @@ impl Drawer {
                 Art::Scarecrow => (RED, 0.8, 0.8),
                 Art::TripletuftedTerrorworm => (WHITE, 0.8, 0.8),
                 Art::Npc => (GREEN, 1.0, GOLDEN_RATIO),
-                Art::Post => (BROWN, 0.8, GOLDEN_RATIO * 0.8),
+                Art::Post => {
+                    let (w, h) = (0.8, GOLDEN_RATIO * 0.8);
+                    let (x, y) = pos.into();
+                    draw_circle(x, y, 0.4, BROWN);
+                    draw_rectangle(x - w / 2.0, y, w, h, BROWN);
+                    draw_circle(x, y + h, 0.4, DARKBROWN);
+                    continue;
+                },
                 Art::Sword => {
                     gl.push_model_matrix(glam::Mat4::from_translation(glam::vec3(
                         pos.x(),
@@ -1629,6 +1705,14 @@ impl Drawer {
             let (x, y) = pos.into();
             draw_rectangle(x - w / 2.0, y, w, h, color);
         }
+
+        system!(ecs, _,
+            &Health(hp, max) = &_
+            &HealthBar       = &_
+            &pos             = &Vec2
+        {
+            health_bar(vec2(1.0, 0.2), hp, max, pos);
+        });
 
         #[cfg(feature = "show-collide")]
         system!(ecs, _,
