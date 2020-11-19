@@ -649,6 +649,7 @@ enum Art {
     Scarecrow,
     Arrow,
     TripletuftedTerrorworm,
+    Tree,
     Npc,
     Sword,
     Post,
@@ -912,17 +913,17 @@ async fn main() {
         radius: f32,
     }
     impl Pen {
-        fn new(ecs: &mut hecs::World) -> Self {
+        fn new(ecs: &mut hecs::World, radius: f32, pos: Vec2, gate: usize) -> Self {
             let mut pen = Self {
                 gate: unsafe { [std::mem::zeroed(), std::mem::zeroed()] },
-                radius: 4.5,
-                pos: vec2(5.0, 5.0),
+                radius,
+                pos,
             };
-            for (i, post_pos) in circle_points(36).enumerate() {
+            for (i, post_pos) in circle_points((PI * radius / 0.4).ceil() as usize).enumerate() {
                 let post = pen.post(post_pos);
                 let e = ecs.spawn(post.clone());
 
-                let gate_i = i - 36 / 4;
+                let gate_i = i - gate;
                 if gate_i <= 1 {
                     pen.gate[gate_i] = (e, post);
                 }
@@ -948,8 +949,47 @@ async fn main() {
         }
     }
 
+    fn tree(ecs: &mut hecs::World, p: Vec2) {
+        ecs.spawn((p, Art::Tree, Phys::pushfoot(0.4)));
+    }
+    for p in circle_points(5) {
+        tree(&mut ecs, p * 6.0 + vec2(-21.5, -20.0));
+    }
+    for p in circle_points(8) {
+        tree(&mut ecs, p * 18.0 + vec2(-21.5, -20.0));
+    }
+    for p in circle_points(6) {
+        tree(&mut ecs, p * 11.0 + vec2(5.0, 5.0));
+    }
+    for p in circle_points(8) {
+        tree(&mut ecs, p * 13.5 + vec2(-40.0, 10.0));
+    }
+
+    let lair_pen = Pen::new(&mut ecs, 8.0, vec2(-40.0, 10.0), 52);
+    lair_pen.gate_open(&mut ecs);
+
+    let rpg_tropes_4 = quests.add(Quest {
+        title: "RPG Tropes IV - Honeycoated Heptahorns",
+        completion_quip: "damn son",
+        unlock_description: concat!(
+            "Your admirable conduct has confirmed our prophecies. The slaughtered \n",
+            "Tripletufted Terrorworms have simply returned. They will continue to \n",
+            "grow in number until this pen, and eventually our simple way of life, \n",
+            "is consumed by them. It is fortold that the only way we can stop them \n",
+            "is by forging the Honeycoated Heptahorn. \n",
+            "In order to craft one, we will need a number of live bees, but naturally, \n",
+            "the only bug net in the village has has been stolen by the Spider Queen, \n",
+            "who guards it in her lair."
+        ),
+        ..Default::default()
+    });
+
     let npc2 = ecs.spawn(npc(vec2(4.0, 11.0)));
-    let pen = Pen::new(&mut ecs);
+    let npc2_guide = move |g: &Game, gi: &mut Vec<_>| {
+        gi.push((Art::Arrow, g.pos(npc2) + vec2(0.0, 0.9)))
+    };
+
+    let pen = Pen::new(&mut ecs, 4.5, vec2(5.0, 5.0), 10);
     let (pen_pos, pen_radius) = (pen.pos, pen.radius);
     #[derive(Copy, Clone)]
     struct Terrorworms([hecs::Entity; 6]);
@@ -990,26 +1030,6 @@ async fn main() {
         }
     }
     let terrorworms = Terrorworms::new(&mut ecs, pen);
-
-    let rpg_tropes_4 = quests.add(Quest {
-        title: "RPG Tropes IV - Honeycoated Heptahorns",
-        completion_quip: "damn son",
-        unlock_description: concat!(
-            "Your admirable conduct has confirmed our prophecies. The slaughtered \n",
-            "Tripletufted Terrorworms have simply returned. They will continue to \n",
-            "grow in number until this pen, and eventually our simple way of life, \n",
-            "is consumed by them. It is fortold that the only way we can stop them \n",
-            "is by forging the Honeycoated Heptahorn. \n",
-            "In order to craft one, we will need a number of live bees, but naturally, \n",
-            "the only bug net in the village has has been stolen by the Spider Queen, \n",
-            "who guards it in her lair."
-        ),
-        ..Default::default()
-    });
-
-    let npc2_guide = move |g: &Game, gi: &mut Vec<_>| {
-        gi.push((Art::Arrow, g.pos(npc2) + vec2(0.0, 0.9)))
-    };
 
     let rpg_tropes_3 = quests.add(Quest {
         title: "RPG Tropes III - Tripletufted Terrorworms",
@@ -1727,6 +1747,12 @@ impl Drawer {
         set_camera(*cam);
 
         clear_background(Color([180, 227, 245, 255]));
+        fn road_through(p: Vec2, slope: Vec2) {
+            let ((sx, sy), (ex, ey)) = ((-slope + p).into(), (slope + p).into());
+            draw_line(sx, sy, ex, ey, 3.2, Color([160, 160, 160, 255]));
+        }
+        draw_line(-20.0, -20.0, -40.0, 10.0, 2.2, Color([165, 165, 165, 255]));
+        road_through(-vec2(20.0, 20.0), vec2(180.0, 420.0));
 
         let gl = unsafe { get_internal_gl().quad_gl };
 
@@ -1768,6 +1794,14 @@ impl Drawer {
                         vec2(0.00, GOLDEN_RATIO),
                         RED,
                     );
+                }
+                Art::Tree => {
+                    let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
+                    draw_circle(0.0, r, r, BROWN);
+                    draw_rectangle(w / -2.0, r, w, h, BROWN);
+                    for &(x, y, r) in &[(0.5, 1.0, 0.8), (0.1, 1.8, 1.0), (-0.5, 1.3, 0.9), (-0.1, 0.8, 0.8)] {
+                        draw_circle(x * 1.6, 1.2 + y, r, DARKGREEN);
+                    }
                 }
                 Art::Post => {
                     let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
