@@ -832,7 +832,7 @@ impl Waffle {
             if let Some((i, delta)) = slot {
                 slots[i] = true;
 
-                if *last_attack + 80 < tick
+                if *last_attack + 120 < tick
                     && (Some(e) != *attacker || *occupied_slots_last_frame == 1)
                 {
                     *attacker = Some(e);
@@ -895,7 +895,7 @@ async fn main() {
     let npc = |npc_pos| (npc_pos, Phys::wings(0.3, 0.21, CircleKind::Push), Art::Npc);
 
     let hero = ecs.spawn((
-        Vec2::unit_x() * -2.5,
+        vec2(-0.4, -3.4),
         Velocity(Vec2::zero()),
         Phys::wings(0.3, 0.21, CircleKind::Push).hurtbox(0.5),
         Art::Hero,
@@ -1116,14 +1116,19 @@ async fn main() {
         tasks: vec![Task {
             label: "Destroy Scarecrow",
             req: Box::new(move |g| g.dead(scarecrow)),
-            guide: Box::new(move |g, gi| {
-                gi.push((Art::Sword, g.pos(scarecrow)));
-            }),
+            guide: Box::new(move |g, gi| gi.push((Art::Sword, g.pos(scarecrow)))),
             ..Default::default()
         }],
         unlocks: vec![rpg_tropes_3],
         ..Default::default()
     });
+
+    let sword = ecs.spawn((
+        vec2(-2.5, -0.4),
+        Art::Sword,
+        Rot(FRAC_PI_2 + 0.1),
+        ZOffset(0.42),
+    ));
 
     quests.add(Quest {
         title: "RPG Tropes Abound!",
@@ -1137,8 +1142,13 @@ async fn main() {
         ),
         unlocks: vec![rpg_tropes_2],
         tasks: vec![Task {
-            label: "Exist",
-            on_finish: Box::new(move |g| or_err!(g.give_item(hero, Item::sword(hero)))),
+            label: "Navigate to the Sword",
+            req: Box::new(move |g| g.hero_dist(g.pos(sword) - vec2(0.8, 0.7)) < 1.3),
+            guide: Box::new(move |g, gi| gi.push((Art::Arrow, g.pos(sword) - vec2(0.8, 0.7)))),
+            on_finish: Box::new(move |g| {
+                or_err!(g.ecs.despawn(sword));
+                or_err!(g.give_item(hero, Item::sword(hero)))
+            }),
             ..Default::default()
         }],
         completion: QuestCompletion::Unlocked,
