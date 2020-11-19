@@ -1760,10 +1760,10 @@ impl Drawer {
                     );
                 }
                 Art::Post => {
-                    let (w, h) = (0.8, GOLDEN_RATIO * 0.8);
-                    draw_circle(0.0, 0.0, 0.4, BROWN);
-                    rect(BROWN, w, h);
-                    draw_circle(0.0, h, 0.4, BEIGE);
+                    let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
+                    draw_circle(0.0, r, r, BROWN);
+                    draw_rectangle(w / -2.0, r, w, h, BROWN);
+                    draw_circle(0.0, h + r, 0.4, BEIGE);
                 }
                 Art::Sword => {
                     draw_triangle(
