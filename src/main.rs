@@ -5,7 +5,7 @@ use macroquad::prelude::*;
 
 #[allow(dead_code)]
 mod math;
-use std::f32::consts::{FRAC_PI_2, TAU};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use megaui_macroquad::{megaui, mouse_over_ui};
 
@@ -139,6 +139,20 @@ struct Hit {
     depth: f32,
     circle_kinds: [CircleKind; 2],
     hit: hecs::Entity,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Scale(Vec2);
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ZOffset(f32);
+
+#[derive(Debug, Clone, Copy)]
+struct Opaqueness(u8);
+impl Default for Opaqueness {
+    fn default() -> Self {
+        Opaqueness(255)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -633,6 +647,7 @@ impl Hero<'_> {
 enum Art {
     Hero,
     Scarecrow,
+    Arrow,
     TripletuftedTerrorworm,
     Npc,
     Sword,
@@ -955,12 +970,16 @@ async fn main() {
             }))
         }
 
-        fn living(&self, g: &Game) -> usize {
-            self.0.iter().filter(|&&e| !g.dead(e)).count()
+        fn living<'a>(&'a self, g: &'a Game) -> impl Iterator<Item = hecs::Entity> + 'a {
+            self.0.iter().copied().filter(move |&e| !g.dead(e))
         }
 
-        fn dead(&self, g: &Game) -> usize {
-            self.0.iter().filter(|&&e| g.dead(e)).count()
+        fn dead<'a>(&'a self, g: &'a Game) -> impl Iterator<Item = hecs::Entity> + 'a {
+            self.0.iter().copied().filter(move |&e| g.dead(e))
+        }
+
+        fn guides<'a>(&'a self, g: &'a Game) -> impl Iterator<Item = (Art, Vec2)> + 'a {
+            self.living(g).map(move |e| (Art::Sword, g.pos(e)))
         }
 
         /// Note: now all of the entities are invalid, only do this
@@ -988,6 +1007,10 @@ async fn main() {
         ..Default::default()
     });
 
+    let npc2_guide = move |g: &Game, gi: &mut Vec<_>| {
+        gi.push((Art::Arrow, g.pos(npc2) + vec2(0.0, 0.9)))
+    };
+
     let rpg_tropes_3 = quests.add(Quest {
         title: "RPG Tropes III - Tripletufted Terrorworms",
         completion_quip: "Of course they just come back ... we need a Honeycoated Heptahorn!",
@@ -1004,12 +1027,14 @@ async fn main() {
             Task {
                 label: "Talk to NPC 2",
                 req: Box::new(move |g| g.hero_dist_ent(npc2) < 1.3),
+                guide: Box::new(npc2_guide),
                 on_finish: Box::new(move |g| pen.gate_open(&mut g.ecs)),
                 ..Default::default()
             },
             Task {
                 label: "Enter the Pen",
                 req: Box::new(move |g| g.hero_dist(pen_pos) < pen_radius * 0.8),
+                guide: Box::new(move |_, gi| gi.push((Art::Arrow, pen_pos))),
                 on_finish: Box::new(move |g| {
                     for &tw in &terrorworms.0 {
                         drop(g.innocent_for(tw, 1));
@@ -1020,7 +1045,8 @@ async fn main() {
             },
             Task {
                 label: "Slaughter the first one",
-                req: Box::new(move |g| terrorworms.dead(g) == 1),
+                req: Box::new(move |g| terrorworms.dead(g).count() == 1),
+                guide: Box::new(move |g, gi| gi.extend(terrorworms.guides(g))),
                 on_finish: Box::new(move |g| {
                     for &tw in &terrorworms.0 {
                         drop(g.innocent_for(tw, 10));
@@ -1034,7 +1060,8 @@ async fn main() {
             },
             Task {
                 label: "Shit boutta get real",
-                req: Box::new(move |g| terrorworms.dead(g) == 2),
+                req: Box::new(move |g| terrorworms.dead(g).count() == 2),
+                guide: Box::new(move |g, gi| gi.extend(terrorworms.guides(g))),
                 on_finish: Box::new(move |g| {
                     for &tw in &terrorworms.0 {
                         drop(g.innocent_for(tw, 10));
@@ -1049,13 +1076,14 @@ async fn main() {
             },
             Task {
                 label: "Kill them all!",
-                req: Box::new(move |g| terrorworms.living(g) == 0),
+                req: Box::new(move |g| terrorworms.living(g).count() == 0),
                 on_finish: Box::new(move |g| pen.gate_open(&mut g.ecs)),
                 ..Default::default()
             },
             Task {
                 label: "Exit the Pen",
                 req: Box::new(move |g| g.hero_dist(pen_pos) > pen_radius * 1.2),
+                guide: Box::new(npc2_guide),
                 on_finish: Box::new(move |g| {
                     terrorworms.refill(g, pen);
                     pen.gate_close(&mut g.ecs)
@@ -1069,7 +1097,7 @@ async fn main() {
 
     ecs.spawn(npc(vec2(-4.0, 0.0)));
     let scarecrow = ecs.spawn((
-        vec2(3.4, -0.4),
+        vec2(3.4, -2.4),
         Phys::pushfoot_bighit(),
         Health(5, 5),
         HealthBar,
@@ -1088,6 +1116,9 @@ async fn main() {
         tasks: vec![Task {
             label: "Destroy Scarecrow",
             req: Box::new(move |g| g.dead(scarecrow)),
+            guide: Box::new(move |g, gi| {
+                gi.push((Art::Sword, g.pos(scarecrow)));
+            }),
             ..Default::default()
         }],
         unlocks: vec![rpg_tropes_3],
@@ -1128,6 +1159,7 @@ async fn main() {
 
             physics.tick(&mut game.ecs);
             quests.update(&mut game);
+            quests.update_guides(&mut game, &drawer.cam);
             waffle.update(&mut game);
             keeper_of_bags.keep(&mut game.ecs);
             wander(&mut game.ecs);
@@ -1184,6 +1216,10 @@ impl Game {
         Ok(())
     }
 
+    fn pos(&self, e: hecs::Entity) -> Vec2 {
+        self.ecs.get::<Vec2>(e).as_deref().copied().unwrap_or_default()
+    }
+
     /// The tuple's first field is true if they died,
     /// the second field represents knockback.
     fn hit(&mut self, hitter_pos: Vec2, WeaponHit { hit }: WeaponHit) -> (bool, Vec2) {
@@ -1218,12 +1254,19 @@ impl Game {
 struct Task {
     label: &'static str,
     req: Box<dyn FnMut(&Game) -> bool>,
+    guide: Box<dyn FnMut(&Game, &mut Vec<(Art, Vec2)>)>,
     on_finish: Box<dyn FnMut(&mut Game)>,
     finished: bool,
 }
 impl Default for Task {
     fn default() -> Self {
-        Self { label: "", req: Box::new(|_| true), on_finish: Box::new(|_| {}), finished: false }
+        Self {
+            label: "",
+            req: Box::new(|_| true),
+            on_finish: Box::new(|_| {}),
+            guide: Box::new(|_, _| {}),
+            finished: false,
+        }
     }
 }
 impl Task {
@@ -1348,6 +1391,8 @@ struct Quests {
     tab_titles: [String; 3],
     new_tabs: [bool; 3],
     jump_to_tab: Option<usize>,
+    guides: Vec<(Art, Vec2)>,
+    guide_ents: Vec<hecs::Entity>,
 }
 impl Quests {
     fn new() -> Self {
@@ -1358,6 +1403,8 @@ impl Quests {
             tab_titles: [(); 3].map(|_| String::with_capacity(25)),
             new_tabs: [false; 3],
             jump_to_tab: None,
+            guide_ents: Vec::with_capacity(100),
+            guides: Vec::with_capacity(100),
         }
     }
 
@@ -1368,23 +1415,63 @@ impl Quests {
     }
 
     fn update(&mut self, g: &mut Game) {
-        if self.auto_accept {
-            for (_, quest) in self.quests.unlocked_mut() {
+        let Self { auto_accept, quests, guides, jump_to_tab, temp, new_tabs, .. } = self;
+        if *auto_accept {
+            for (_, quest) in quests.unlocked_mut() {
                 quest.completion.accept(g.tick);
             }
         }
 
-        for (_, _, quest) in self.quests.accepted_mut() {
-            if quest.tasks.iter_mut().all(|t| t.done(g)) {
+        guides.drain(..);
+        for (_, _, quest) in quests.accepted_mut() {
+            if let Some(task) =
+                quest.tasks.iter_mut().find_map(|t| if !t.done(g) { Some(t) } else { None })
+            {
+                (task.guide)(g, guides);
+            } else {
                 quest.completion.finish(g.tick);
-                self.jump_to_tab = Some(2);
-                self.temp.extend(quest.unlocks.iter().copied());
+                *jump_to_tab = Some(2);
+                temp.extend(quest.unlocks.iter().copied());
             }
         }
 
-        for unlock in self.temp.drain(..) {
-            self.new_tabs[0] = true;
-            self.quests.0[unlock].completion.unlock();
+        for unlock in temp.drain(..) {
+            new_tabs[0] = true;
+            quests.0[unlock].completion.unlock();
+        }
+    }
+
+    fn update_guides(&mut self, g: &mut Game, cam: &Camera2D) {
+        let Self { guides, guide_ents, .. } = self;
+        for (_, &e) in guide_ents.iter().enumerate().skip_while(|&(i, _)| i < guides.len()) {
+            drop(g.ecs.remove::<(Art, Vec2)>(e));
+        }
+        for (i, (art, goal)) in guides.drain(..).enumerate() {
+            let ent = guide_ents.get(i).copied().unwrap_or_else(|| {
+                let e = g.ecs.reserve_entity();
+                guide_ents.push(e);
+                e
+            });
+            let screen = cam.screen_to_world(vec2(screen_width(), screen_height())) - cam.target;
+            let top_left = cam.target - screen;
+
+            let flip_y = vec2(1.0, -1.0);
+            let from = (goal - top_left) * flip_y;
+            let screen_size = screen * flip_y * 2.0;
+            let (mut pos, rot, scale) = if from.cmplt(screen_size).all() && from.cmpgt(Vec2::zero()).all() {
+                (goal + vec2(0.0, 1.0), Rot(PI), 1.0)
+            } else {
+                (
+                    top_left + from.max(Vec2::zero()).min(screen_size) * flip_y,
+                    Rot(Rot::from_vec2(cam.target - goal).0 + FRAC_PI_2),
+                    1.35,
+                )
+            };
+
+            let bob = math::smoothstep((g.tick as f32 / 10.0).sin()) * 0.2;
+            let v = Rot(rot.0 - FRAC_PI_2).vec2();
+            pos += (v * 0.67 * scale) + (v * bob);
+            or_err!(g.ecs.insert(ent, (art, pos, rot, ZOffset(-999.0), Scale(vec2(1.0, 0.4) * scale))));
         }
     }
 
@@ -1584,22 +1671,14 @@ fn health_bar(size: Vec2, hp: u32, max: u32, pos: Vec2) {
         pub fn lerp(a: u8, b: u8, t: f32) -> u8 {
             a + (((b - a) as f32 / 255.0 * t) * 255.0) as u8
         }
-        Color([
-            lerp(a[0], b[0], t),
-            lerp(a[1], b[1], t),
-            lerp(a[2], b[2], t),
-            lerp(a[3], b[3], t),
-        ])
+        Color([lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t), lerp(a[3], b[3], t)])
     }
 
     let (x, y) = (pos - size * vec2(0.5, 1.4)).into();
     let (w, h) = size.into();
     let ratio = hp as f32 / max as f32;
-    let mut color = if ratio < 0.5 {
-        lerp_color(RED, YELLOW, ratio)
-    } else {
-        lerp_color(YELLOW, GREEN, ratio)
-    };
+    let mut color =
+        if ratio < 0.5 { lerp_color(RED, YELLOW, ratio) } else { lerp_color(YELLOW, GREEN, ratio) };
     color.0[3] = 150;
     draw_rectangle_lines(x, y, w, h, size.y() * 0.3, color);
     color.0[3] = 100;
@@ -1607,7 +1686,7 @@ fn health_bar(size: Vec2, hp: u32, max: u32, pos: Vec2) {
 }
 
 struct Drawer {
-    sprites: Vec<(Vec2, Art, Option<Rot>)>,
+    sprites: Vec<(Vec2, Art, ZOffset, Option<Rot>, Option<Scale>)>,
     damage_labels: DamageLabelBin,
     cam: Camera2D,
 }
@@ -1642,35 +1721,51 @@ impl Drawer {
         let gl = unsafe { get_internal_gl().quad_gl };
 
         sprites.extend(
-            ecs.query::<(&_, &_, Option<&Rot>)>().iter().map(|(_, (&p, &a, r))| (p, a, r.copied())),
+            ecs.query::<(&_, &_, Option<&ZOffset>, Option<&Rot>, Option<&Scale>)>()
+                .iter()
+                .map(|(_, (&p, &a, z, r, s))| (p, a, z.copied().unwrap_or_default(), r.copied(), s.copied())),
         );
-        sprites.sort_by(|a, b| float_cmp(b, a, |(pos, art, _)| pos.y() + art.z_offset()));
-        for (pos, art, rot) in sprites.drain(..) {
-            const GOLDEN_RATIO: f32 = 1.618034;
+        sprites.sort_by(|a, b| float_cmp(b, a, |(pos, art, z, ..)| pos.y() + art.z_offset() + z.0));
+        for (pos, art, _, rot, scale) in sprites.drain(..) {
+            gl.push_model_matrix(glam::Mat4::from_translation(glam::vec3(pos.x(), pos.y(), 0.0)));
+            if let Some(Rot(r)) = rot {
+                gl.push_model_matrix(glam::Mat4::from_rotation_z(r));
+            }
+            if let Some(Scale(v)) = scale {
+                gl.push_model_matrix(glam::Mat4::from_scale(glam::vec3(v.x(), v.y(), 1.0)));
+            }
 
-            let (color, w, h) = match art {
-                Art::Hero => (BLUE, 1.0, 1.0),
-                Art::Scarecrow => (RED, 0.8, 0.8),
-                Art::TripletuftedTerrorworm => (WHITE, 0.8, 0.8),
-                Art::Npc => (GREEN, 1.0, GOLDEN_RATIO),
+            fn rect(color: Color, w: f32, h: f32) {
+                draw_rectangle(w / -2.0, 0.0, w, h, color);
+            }
+
+            const GOLDEN_RATIO: f32 = 1.618034;
+            match art {
+                Art::Hero => rect(BLUE, 1.0, 1.0),
+                Art::Scarecrow => rect(GOLD, 0.8, 0.8),
+                Art::TripletuftedTerrorworm => rect(WHITE, 0.8, 0.8),
+                Art::Npc => rect(GREEN, 1.0, GOLDEN_RATIO),
+                Art::Arrow => {
+                    draw_triangle(
+                        vec2(0.11, 0.0),
+                        vec2(-0.11, 0.0),
+                        vec2(0.00, GOLDEN_RATIO),
+                        RED,
+                    );
+                    draw_triangle(
+                        vec2(-0.225, 0.85),
+                        vec2(0.225, 0.85),
+                        vec2(0.00, GOLDEN_RATIO),
+                        RED,
+                    );
+                }
                 Art::Post => {
                     let (w, h) = (0.8, GOLDEN_RATIO * 0.8);
-                    let (x, y) = pos.into();
-                    draw_circle(x, y, 0.4, BROWN);
-                    draw_rectangle(x - w / 2.0, y, w, h, BROWN);
-                    draw_circle(x, y + h, 0.4, DARKBROWN);
-                    continue;
-                },
+                    draw_circle(0.0, 0.0, 0.4, BROWN);
+                    rect(BROWN, w, h);
+                    draw_circle(0.0, h, 0.4, BEIGE);
+                }
                 Art::Sword => {
-                    gl.push_model_matrix(glam::Mat4::from_translation(glam::vec3(
-                        pos.x(),
-                        pos.y(),
-                        0.0,
-                    )));
-                    if let Some(Rot(r)) = rot {
-                        gl.push_model_matrix(glam::Mat4::from_rotation_z(r));
-                    }
-
                     draw_triangle(
                         vec2(0.075, 0.0),
                         vec2(-0.075, 0.0),
@@ -1695,15 +1790,16 @@ impl Drawer {
                     let (x, y) = vec2(-0.225, 0.400).into();
                     let (w, z) = vec2(0.225, 0.400).into();
                     draw_line(x, y, w, z, 0.135, DARKGRAY);
-                    if rot.is_some() {
-                        gl.pop_model_matrix();
-                    }
-                    gl.pop_model_matrix();
-                    continue;
                 }
             };
-            let (x, y) = pos.into();
-            draw_rectangle(x - w / 2.0, y, w, h, color);
+
+            if rot.is_some() {
+                gl.pop_model_matrix();
+            }
+            if scale.is_some() {
+                gl.pop_model_matrix();
+            }
+            gl.pop_model_matrix();
         }
 
         system!(ecs, _,
