@@ -1614,16 +1614,9 @@ impl Quests {
                 let tab = {
                     let jump = self.jump_to_tab.take();
                     let titles = self.tab_titles();
-                    let mut tabbar = Tabbar::new(
-                        hash!(),
-                        Vector2::new(0.0, 0.0),
-                        Vector2::new(size.x(), tab_height),
-                        &titles,
-                    );
-                    if let Some(n) = jump {
-                        tabbar = tabbar.jump_to_tab(n);
-                    }
-                    tabbar.ui(ui)
+                    Tabbar::new(hash!(), Vector2::new(0.0, 0.0), Vector2::new(size.x(), tab_height), &titles)
+                        .selected_tab(jump)
+                        .ui(ui)
                 };
 
                 self.new_tabs[tab as usize] = false;
@@ -1762,7 +1755,8 @@ impl Drawer {
         cam.zoom = vec2(1.0, screen_width() / screen_height()) / 7.8;
         set_camera(*cam);
         let screen = cam.screen_to_world(vec2(screen_width(), screen_height())) - cam.target;
-        let screen_r = screen.length();
+        let top_left = cam.target - screen;
+
         #[cfg(feature = "show-culling")]
         {
             cam.zoom = vec2(1.0, screen_width() / screen_height()) / 7.8 / 2.0;
@@ -1782,25 +1776,22 @@ impl Drawer {
             let (x, y) = (cam.target - screen).into();
             let (w, h) = (screen * 2.0).into();
             draw_rectangle_lines(x, y, w, h, 0.1, RED);
-            let mut color = RED;
-            color.0[3] = 100;
-            draw_circle(cam.target.x(), cam.target.y(), screen_r, color);
         }
 
         let gl = unsafe { get_internal_gl().quad_gl };
+
+        let flip_y = vec2(1.0, -1.0);
+        let screen_size = screen * flip_y * 2.0;
 
         sprites.extend(
             ecs.query::<(&_, &_, Option<&ZOffset>, Option<&Rot>, Option<&Scale>)>()
                 .iter()
                 .map(|(_, (&p, &a, z, r, s))| (p, a, z.copied().unwrap_or_default(), r.copied(), s.copied()))
                 .filter(|&(p, art, _, rot, _): &SpriteData| {
-                    let bound = art.bounding();
-                    let (p, r) = if rot.is_some() {
-                        (p, 2.0 * bound)
-                    } else {
-                        (p + vec2(0.0, bound), bound)
-                    };
-                    (screen_r + r) - (cam.target - p).length() > 0.0
+                    let (x, m) = rot.map(|_| (0.0, 2.0)).unwrap_or((1.0, 1.0));
+                    let bound = Vec2::splat(art.bounding() * m);
+                    let from = (p + vec2(0.0, bound.x() * x) - top_left) * flip_y;
+                    from.cmplt(screen_size + bound).all() && from.cmpgt(-bound).all()
                 }),
         );
         sprites.sort_by(|a, b| float_cmp(b, a, |(pos, art, z, ..)| pos.y() + art.z_offset() + z.0));
@@ -1932,20 +1923,17 @@ impl Drawer {
             }
         });
 
-        #[cfg(feature = "show-collide")]
+        #[cfg(feature = "show-culling")]
         system!(ecs, _,
             &art = &Art
             &pos = &Vec2
             rot  = Option<&Rot>
         {
-            let r = art.bounding();
             let mut color = BEIGE;
             color.0[3] = 100;
-            if rot.is_some() {
-                draw_circle(pos.x(), pos.y(), 2.0 * r, color);
-            } else {
-                draw_circle(pos.x(), pos.y() + r, r, color);
-            }
+            let l = art.bounding() * rot.map(|_| 4.0).unwrap_or(2.0);
+            let (x, y) = pos.into();
+            draw_rectangle(x - l / 2.0, rot.map(|_| y - l / 2.0).unwrap_or(y), l, l, color);
         });
 
         set_default_camera();
