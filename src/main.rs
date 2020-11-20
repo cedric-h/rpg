@@ -643,6 +643,8 @@ impl Hero<'_> {
     }
 }
 
+const GOLDEN_RATIO: f32 = 1.618034;
+
 #[derive(Copy, Clone, Debug)]
 enum Art {
     Hero,
@@ -659,6 +661,19 @@ impl Art {
         match self {
             Art::Sword => -0.5,
             _ => 0.0,
+        }
+    }
+
+    fn bounding(self) -> f32 {
+        match self {
+            Art::Hero => 0.5,
+            Art::Scarecrow => 0.4,
+            Art::Arrow => GOLDEN_RATIO / 2.0,
+            Art::TripletuftedTerrorworm => 0.4,
+            Art::Tree => 2.0,
+            Art::Npc => GOLDEN_RATIO / 2.0,
+            Art::Sword => GOLDEN_RATIO / 2.0,
+            Art::Post => 1.0,
         }
     }
 }
@@ -1715,8 +1730,9 @@ fn health_bar(size: Vec2, hp: u32, max: u32, pos: Vec2) {
     draw_rectangle(x, y, w * ratio, h, color);
 }
 
+type SpriteData = (Vec2, Art, ZOffset, Option<Rot>, Option<Scale>);
 struct Drawer {
-    sprites: Vec<(Vec2, Art, ZOffset, Option<Rot>, Option<Scale>)>,
+    sprites: Vec<SpriteData>,
     damage_labels: DamageLabelBin,
     cam: Camera2D,
 }
@@ -1745,6 +1761,13 @@ impl Drawer {
         let Self { sprites, cam, .. } = self;
         cam.zoom = vec2(1.0, screen_width() / screen_height()) / 7.8;
         set_camera(*cam);
+        let screen = cam.screen_to_world(vec2(screen_width(), screen_height())) - cam.target;
+        let screen_r = screen.length();
+        #[cfg(feature = "show-culling")]
+        {
+            cam.zoom = vec2(1.0, screen_width() / screen_height()) / 7.8 / 2.0;
+            set_camera(*cam);
+        }
 
         clear_background(Color([180, 227, 245, 255]));
         fn road_through(p: Vec2, slope: Vec2) {
@@ -1754,12 +1777,31 @@ impl Drawer {
         draw_line(-20.0, -20.0, -40.0, 10.0, 2.2, Color([165, 165, 165, 255]));
         road_through(-vec2(20.0, 20.0), vec2(180.0, 420.0));
 
+        #[cfg(feature = "show-culling")]
+        {
+            let (x, y) = (cam.target - screen).into();
+            let (w, h) = (screen * 2.0).into();
+            draw_rectangle_lines(x, y, w, h, 0.1, RED);
+            let mut color = RED;
+            color.0[3] = 100;
+            draw_circle(cam.target.x(), cam.target.y(), screen_r, color);
+        }
+
         let gl = unsafe { get_internal_gl().quad_gl };
 
         sprites.extend(
             ecs.query::<(&_, &_, Option<&ZOffset>, Option<&Rot>, Option<&Scale>)>()
                 .iter()
-                .map(|(_, (&p, &a, z, r, s))| (p, a, z.copied().unwrap_or_default(), r.copied(), s.copied())),
+                .map(|(_, (&p, &a, z, r, s))| (p, a, z.copied().unwrap_or_default(), r.copied(), s.copied()))
+                .filter(|&(p, art, _, rot, _): &SpriteData| {
+                    let bound = art.bounding();
+                    let (p, r) = if rot.is_some() {
+                        (p, 2.0 * bound)
+                    } else {
+                        (p + vec2(0.0, bound), bound)
+                    };
+                    (screen_r + r) - (cam.target - p).length() > 0.0
+                }),
         );
         sprites.sort_by(|a, b| float_cmp(b, a, |(pos, art, z, ..)| pos.y() + art.z_offset() + z.0));
         for (pos, art, _, rot, scale) in sprites.drain(..) {
@@ -1775,7 +1817,6 @@ impl Drawer {
                 draw_rectangle(w / -2.0, 0.0, w, h, color);
             }
 
-            const GOLDEN_RATIO: f32 = 1.618034;
             match art {
                 Art::Hero => rect(BLUE, 1.0, 1.0),
                 Art::Scarecrow => rect(GOLD, 0.8, 0.8),
@@ -1887,6 +1928,22 @@ impl Drawer {
             for &kind in &[Push, Hit, Hurt] {
                 let (x, y) = (pos + centroid(phys, kind)).into();
                 draw_circle(x, y, 0.1, kind_color(kind));
+            }
+        });
+
+        #[cfg(feature = "show-collide")]
+        system!(ecs, _,
+            &art = &Art
+            &pos = &Vec2
+            rot  = Option<&Rot>
+        {
+            let r = art.bounding();
+            let mut color = BEIGE;
+            color.0[3] = 100;
+            if rot.is_some() {
+                draw_circle(pos.x(), pos.y(), 2.0 * r, color);
+            } else {
+                draw_circle(pos.x(), pos.y() + r, r, color);
             }
         });
 

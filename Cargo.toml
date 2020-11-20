@@ -8,6 +8,7 @@ edition = "2018"
 
 [features]
 show-collide = []
+show-culling = []
 
 [dependencies]
 hecs = { git = "https://github.com/Ralith/hecs", features = [ "macros" ] }
