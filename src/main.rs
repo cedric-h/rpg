@@ -1840,9 +1840,10 @@ impl Drawer {
                     let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
                     draw_circle(0.0, r, r, BROWN);
                     draw_rectangle(w / -2.0, r, w, h, BROWN);
-                    for &(x, y, r) in &[(0.5, 1.0, 0.8), (0.1, 1.8, 1.0), (-0.5, 1.3, 0.9), (-0.1, 0.8, 0.8)] {
-                        draw_circle(x * 1.6, 1.2 + y, r, DARKGREEN);
-                    }
+                    draw_circle( 0.80, 2.2, 0.8, DARKGREEN);
+                    draw_circle( 0.16, 3.0, 1.0, DARKGREEN);
+                    draw_circle(-0.80, 2.5, 0.9, DARKGREEN);
+                    draw_circle(-0.16, 2.0, 0.8, DARKGREEN);
                 }
                 Art::Post => {
                     let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
