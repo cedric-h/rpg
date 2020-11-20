@@ -1796,24 +1796,43 @@ impl Drawer {
         );
         sprites.sort_by(|a, b| float_cmp(b, a, |(pos, art, z, ..)| pos.y() + art.z_offset() + z.0));
         for (pos, art, _, rot, scale) in sprites.drain(..) {
-            gl.push_model_matrix(glam::Mat4::from_translation(glam::vec3(pos.x(), pos.y(), 0.0)));
-            if let Some(Rot(r)) = rot {
-                gl.push_model_matrix(glam::Mat4::from_rotation_z(r));
-            }
-            if let Some(Scale(v)) = scale {
-                gl.push_model_matrix(glam::Mat4::from_scale(glam::vec3(v.x(), v.y(), 1.0)));
-            }
+            let mut push_model_matrix = || {
+                gl.push_model_matrix(
+                    glam::Mat4::from_translation(glam::vec3(pos.x(), pos.y(), 0.0))
+                        * rot.map(|Rot(r)| glam::Mat4::from_rotation_z(r)).unwrap_or_default()
+                        * scale
+                            .map(|Scale(v)| glam::Mat4::from_scale(glam::vec3(v.x(), v.y(), 1.0)))
+                            .unwrap_or_default()
+                );
+            };
 
-            fn rect(color: Color, w: f32, h: f32) {
-                draw_rectangle(w / -2.0, 0.0, w, h, color);
-            }
+            let (x, y) = pos.into();
+            let rect = |color: Color, w: f32, h: f32| {
+                draw_rectangle(x - w / 2.0, y, w, h, color);
+            };
 
             match art {
                 Art::Hero => rect(BLUE, 1.0, 1.0),
                 Art::Scarecrow => rect(GOLD, 0.8, 0.8),
                 Art::TripletuftedTerrorworm => rect(WHITE, 0.8, 0.8),
                 Art::Npc => rect(GREEN, 1.0, GOLDEN_RATIO),
+                Art::Tree => {
+                    let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
+                    draw_circle(x, y + r, r, BROWN);
+                    draw_rectangle(x - w / 2.0, y + r, w, h, BROWN);
+                    draw_circle(x + 0.80, y + 2.2, 0.8, DARKGREEN);
+                    draw_circle(x + 0.16, y + 3.0, 1.0, DARKGREEN);
+                    draw_circle(x - 0.80, y + 2.5, 0.9, DARKGREEN);
+                    draw_circle(x - 0.16, y + 2.0, 0.8, DARKGREEN);
+                }
+                Art::Post => {
+                    let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
+                    draw_circle(x, y + r, r, BROWN);
+                    draw_rectangle(x - w / 2.0, y + r, w, h, BROWN);
+                    draw_circle(x, y + h + r, 0.4, BEIGE);
+                }
                 Art::Arrow => {
+                    push_model_matrix();
                     draw_triangle(
                         vec2(0.11, 0.0),
                         vec2(-0.11, 0.0),
@@ -1826,23 +1845,10 @@ impl Drawer {
                         vec2(0.00, GOLDEN_RATIO),
                         RED,
                     );
-                }
-                Art::Tree => {
-                    let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
-                    draw_circle(0.0, r, r, BROWN);
-                    draw_rectangle(w / -2.0, r, w, h, BROWN);
-                    draw_circle( 0.80, 2.2, 0.8, DARKGREEN);
-                    draw_circle( 0.16, 3.0, 1.0, DARKGREEN);
-                    draw_circle(-0.80, 2.5, 0.9, DARKGREEN);
-                    draw_circle(-0.16, 2.0, 0.8, DARKGREEN);
-                }
-                Art::Post => {
-                    let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
-                    draw_circle(0.0, r, r, BROWN);
-                    draw_rectangle(w / -2.0, r, w, h, BROWN);
-                    draw_circle(0.0, h + r, 0.4, BEIGE);
+                    gl.pop_model_matrix();
                 }
                 Art::Sword => {
+                    push_model_matrix();
                     draw_triangle(
                         vec2(0.075, 0.0),
                         vec2(-0.075, 0.0),
@@ -1867,16 +1873,9 @@ impl Drawer {
                     let (x, y) = vec2(-0.225, 0.400).into();
                     let (w, z) = vec2(0.225, 0.400).into();
                     draw_line(x, y, w, z, 0.135, DARKGRAY);
+                    gl.pop_model_matrix()
                 }
             };
-
-            if rot.is_some() {
-                gl.pop_model_matrix();
-            }
-            if scale.is_some() {
-                gl.pop_model_matrix();
-            }
-            gl.pop_model_matrix();
         }
 
         system!(ecs, _,
