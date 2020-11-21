@@ -37,7 +37,7 @@ fn float_cmp<T>(a: T, b: T, mut f: impl FnMut(T) -> f32) -> std::cmp::Ordering {
     f(a).partial_cmp(&f(b)).unwrap_or(std::cmp::Ordering::Greater)
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 struct Velocity(Vec2);
 impl Velocity {
     fn knockback(&mut self, delta: Vec2, force: f32) {
@@ -278,9 +278,40 @@ impl Physics {
     }
 }
 
+#[derive(Debug, Clone)]
+enum BagWeapon {
+    Out(hecs::Entity),
+    In { item: Item, wants_out: bool },
+}
+impl BagWeapon {
+    fn out(&mut self) -> Option<hecs::Entity> {
+        match self {
+            &mut BagWeapon::Out(e) => Some(e),
+            BagWeapon::In { wants_out, .. } => {
+                *wants_out = true;
+                None
+            }
+        }
+    }
+
+    fn wants_out(&self) -> bool {
+        match self {
+            BagWeapon::Out(_) => false,
+            BagWeapon::In { wants_out, .. } => *wants_out,
+        }
+    }
+
+    fn take_item(self) -> Option<Item> {
+        match self {
+            BagWeapon::Out(_) => None,
+            BagWeapon::In { item, .. } => Some(item),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct Bag {
-    weapon: Option<hecs::Entity>,
+    weapon: Option<BagWeapon>,
     temp_weapon: Option<Item>,
     slots: [Option<Item>; 3],
 }
@@ -290,9 +321,10 @@ impl Bag {
         me.take(item);
         me
     }
+
     fn take(&mut self, item: Item) {
         if self.weapon.is_none() && self.temp_weapon.is_none() {
-            self.temp_weapon = Some(item);
+            self.weapon = Some(BagWeapon::In { item, wants_out: false });
         } else {
             let empty_slot = self.slots.iter_mut().find(|s| s.is_none());
             if let Some(slot) = empty_slot {
@@ -315,12 +347,17 @@ impl KeeperOfBags {
 
     fn keep(&mut self, ecs: &mut hecs::World) {
         let Self { temp, ownerless } = self;
-        temp.extend(ecs.query::<&mut Bag>().iter().filter_map(|(_, b)| {
-            let w = b.temp_weapon.take()?;
-            let e = ecs.reserve_entity();
-            b.weapon = Some(e);
-            Some((e, w))
-        }));
+        temp.extend(
+            ecs.query::<&mut Bag>()
+                .iter()
+                .filter(|(_, b)| b.weapon.as_ref().map(|b| b.wants_out()).unwrap_or(false))
+                .filter_map(|(_, b)| {
+                    let item = b.weapon.take()?.take_item()?;
+                    let e = ecs.reserve_entity();
+                    b.weapon = Some(BagWeapon::Out(e));
+                    Some((e, item))
+                }),
+        );
         for (ent, weapon) in temp.drain(..) {
             or_err!(ecs.insert(ent, weapon));
         }
@@ -375,14 +412,29 @@ impl Default for Attack {
 #[derive(Debug, Clone, Copy)]
 struct SwingState {
     doing_damage: bool,
+    attack_kind: AttackKind,
     start_tick: u32,
     end_tick: u32,
     toward: Vec2,
 }
 
 #[derive(Debug, Clone, Copy)]
+enum AttackKind {
+    Swipe,
+    Stab,
+}
+impl AttackKind {
+    fn duration(self) -> u32 {
+        match self {
+            AttackKind::Swipe => 50,
+            AttackKind::Stab => 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 struct WeaponInput {
-    start_attacking: bool,
+    start_attacking: Option<AttackKind>,
     tick: u32,
     wielder_vel: Vec2,
     wielder_pos: Vec2,
@@ -443,28 +495,6 @@ impl Weapon<'_> {
         }
     }
 
-    /*
-    fn environmental_hits(&self) -> Vec2 {
-        match self.wep.attack {
-            Attack::Swing(s) if s.doing_damage => self
-                .contacts
-                .0
-                .iter()
-                .filter(|h| matches!(h.circle_kinds[0], CircleKind::Hurt | CircleKind::Hit))
-                .map(|h| WeaponHit { hit: h.hit })
-                .filter(|wh| {
-                    if self.wep.ents_hit.contains(&wh.hit) {
-                        false
-                    } else {
-                        self.wep.ents_hit.push(wh.hit);
-                        true
-                    }
-                })
-                .collect(),
-            _ => Default::default(),
-        }
-    }*/
-
     fn rest(
         &mut self,
         WeaponInput { wielder_pos, wielder_vel, wielder_dir, tick, .. }: WeaponInput,
@@ -488,22 +518,23 @@ impl Weapon<'_> {
         let WeaponInput { wielder_pos, start_attacking, target, tick, .. } = input;
 
         use Attack::*;
-        self.wep.attack = match self.wep.attack {
-            Ready if start_attacking => {
+        self.wep.attack = match (start_attacking, self.wep.attack) {
+            (Some(attack_kind), Ready) => {
                 self.wep.ents_hit.clear();
                 Swing(SwingState {
                     start_tick: tick,
-                    end_tick: tick + 50,
+                    end_tick: tick + attack_kind.duration(),
+                    attack_kind,
                     toward: self.from_center(wielder_pos, target),
                     doing_damage: false,
                 })
             }
-            Swing(SwingState { end_tick, .. }) if end_tick < tick => {
+            (_, Swing(SwingState { end_tick, .. })) if end_tick < tick => {
                 self.wep.ents_hit.clear();
                 Cooldown { end_tick: tick + 10 }
             }
-            Cooldown { end_tick, .. } if end_tick < tick => Ready,
-            other => other,
+            (_, Cooldown { end_tick, .. }) if end_tick < tick => Ready,
+            (_, other) => other,
         };
 
         !matches!(self.wep.attack, Ready | Cooldown { .. })
@@ -520,7 +551,7 @@ impl Weapon<'_> {
     fn swing(
         &mut self,
         input: WeaponInput,
-        SwingState { start_tick, end_tick, toward, .. }: SwingState,
+        SwingState { attack_kind, start_tick, end_tick, toward, .. }: SwingState,
     ) -> bool {
         let WeaponInput { wielder_pos, tick, .. } = input;
         let (start_rot, start_pos) = self.rest(input);
@@ -533,13 +564,22 @@ impl Weapon<'_> {
         let swing = SWING_WIDTH / 4.0 * dir;
         let hand_pos = center + toward / 2.0;
         #[rustfmt::skip]
-        let frames = [
-            ( 2.50, rot - swing * 1.0, Some(hand_pos) , false ), // ready   
-            ( 2.65, rot - swing * 2.0, None           , false ), // back up 
-            ( 1.00, rot + swing * 2.0, None           , true  ), // swing   
-            ( 2.85, rot + swing * 3.0, None           , false ), // recovery
-            ( 2.50, start_rot.0      , Some(start_pos), false ), // return  
-        ];
+        let frames = match attack_kind {
+            AttackKind::Swipe => [
+                (2.50, Some(rot - swing * 1.0), Some(hand_pos) , false), // ready   
+                (2.65, Some(rot - swing * 2.0), None           , false), // back up 
+                (1.00, Some(rot + swing * 2.0), None           , true ), // swipe   
+                (2.85, Some(rot + swing * 3.0), None           , false), // recovery
+                (2.50, Some(start_rot.0      ), Some(start_pos), false), // return  
+            ],
+            AttackKind::Stab => [
+                (3.00, Some(rot)        , Some(hand_pos               ), false), // ready   
+                (2.00, None             , Some(hand_pos - toward * 0.2), false), // back up 
+                (1.00, None             , Some(hand_pos + toward * 0.8), true ), // stab   
+                (2.50, None             , Some(hand_pos               ), false), // recovery
+                (2.50, Some(start_rot.0), Some(start_pos              ), false), // return  
+            ]
+        };
 
         let (st, et, t) = (start_tick as f32, end_tick as f32, tick as f32);
         let dt = et - st;
@@ -551,7 +591,6 @@ impl Weapon<'_> {
         let mut do_damage = false;
         for &(duration, angle_rot, pos, damage) in &frames {
             let tick = last_tick + dt * (duration / total);
-            let rot = Rot(angle_rot).vec2();
             let prog = math::inv_lerp(last_tick, tick, t).min(1.0).max(0.0);
 
             if prog > 0.0 {
@@ -559,14 +598,17 @@ impl Weapon<'_> {
                     do_damage = do_damage || damage;
                 }
 
-                self.rot.set_vec2(math::slerp(last_rot, rot, prog));
+                if let Some(angle_rot) = angle_rot {
+                    let rot = Rot(angle_rot).vec2();
+                    self.rot.set_vec2(math::slerp(last_rot, rot, prog));
+                    last_rot = rot;
+                }
                 if let Some(p) = pos {
                     *self.pos = last_pos.lerp(p, prog);
                     last_pos = p;
                 }
             }
 
-            last_rot = rot;
             last_tick = tick;
         }
 
@@ -651,6 +693,7 @@ enum Art {
     Scarecrow,
     Arrow,
     TripletuftedTerrorworm,
+    VioletVagabond,
     Tree,
     Npc,
     Sword,
@@ -670,6 +713,7 @@ impl Art {
             Art::Scarecrow => 0.4,
             Art::Arrow => GOLDEN_RATIO / 2.0,
             Art::TripletuftedTerrorworm => 0.4,
+            Art::VioletVagabond => 0.4,
             Art::Tree => 2.0,
             Art::Npc => GOLDEN_RATIO / 2.0,
             Art::Sword => GOLDEN_RATIO / 2.0,
@@ -696,6 +740,14 @@ impl Innocence {
 
 #[derive(Copy, Clone, Debug)]
 struct Health(u32, u32);
+impl Health {
+    fn full(hp: u32) -> Self {
+        Self(hp, hp)
+    }
+    fn ratio(self) -> f32 {
+        self.0 as f32 / self.1 as f32
+    }
+}
 
 #[derive(Copy, Clone, Debug)]
 struct HealthBar;
@@ -772,7 +824,7 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
     let (hero_pos, hero_wep, hero_vel, hero_dir) = match game.ecs.query_one_mut::<Hero>(hero) {
         Ok(mut hero) => {
             hero.movement();
-            (*hero.pos, hero.bag.weapon, hero.vel.0, *hero.dir)
+            (*hero.pos, hero.bag.weapon.as_mut().and_then(|w| w.out()), hero.vel.0, *hero.dir)
         }
         Err(_) => return,
     };
@@ -782,7 +834,9 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
         .and_then(|e| game.ecs.query_one_mut::<Weapon>(e).ok())
         .map(|mut wep| {
             wep.tick(WeaponInput {
-                start_attacking: !mouse_over_ui() && is_mouse_button_down(MouseButton::Left),
+                start_attacking: Some(AttackKind::Swipe).filter(|_| {
+                    !mouse_over_ui() && is_mouse_button_down(MouseButton::Left)
+                }),
                 target: mouse_pos,
                 wielder_pos: hero_pos,
                 wielder_vel: hero_vel,
@@ -794,7 +848,12 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
         .unwrap_or_default();
 
     let knockback = hero_attacks.iter().fold(Vec2::zero(), |acc, &hit| {
-        let (dead, vel) = game.hit(hero_pos, hit);
+        let (dead, vel) = game.hit(HitInput {
+            hitter_pos: hero_pos,
+            hit,
+            damage: 1,
+            knockback: 0.2,
+        });
         if dead {
             quests.update(game);
         }
@@ -805,10 +864,46 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
     }
 }
 
-struct Fighter;
+#[derive(Copy, Clone, Debug)]
+enum FighterBehavior {
+    SwingAlways,
+    LowHealthStab,
+}
+impl FighterBehavior {
+    fn attack_kind(self, hp: Health) -> AttackKind {
+        use { FighterBehavior::*, AttackKind::* };
+        match self {
+            LowHealthStab if hp.ratio() < 0.5 => Stab,
+            _ => Swipe,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+struct Fighter {
+    behavior: FighterBehavior,
+    aggroed: bool,
+    chase_speed: f32,
+    charge_speed: f32,
+    attack_interval: u32,
+}
+impl Default for Fighter {
+    fn default() -> Self {
+        Self {
+            behavior: FighterBehavior::SwingAlways,
+            aggroed: false,
+            chase_speed: 0.0065,
+            charge_speed: 0.0085,
+            attack_interval: 120,
+        }
+    }
+}
+
 struct Waffle {
-    enemies: Vec<(hecs::Entity, Vec2, Velocity)>,
+    enemies: Vec<(hecs::Entity, Vec2, Velocity, Fighter, Health)>,
     last_attack: u32,
+    attack_ends: u32,
+    attack_kind: Option<AttackKind>,
     attacker: Option<hecs::Entity>,
     occupied_slots_last_frame: usize,
 }
@@ -817,28 +912,49 @@ impl Waffle {
         Self {
             enemies: Vec::with_capacity(100),
             last_attack: 0,
+            attack_ends: 0,
             attacker: None,
+            attack_kind: None,
             occupied_slots_last_frame: 0,
         }
     }
 
     fn update(&mut self, game: &mut Game) {
         let &mut Game { hero_pos, tick, .. } = game;
-        let Self { enemies, last_attack, attacker, occupied_slots_last_frame } = self;
+        let Self { enemies, attack_ends, last_attack, attack_kind, attacker, occupied_slots_last_frame } = self;
+
+        let ecs = &mut game.ecs;
+        system!(ecs, _,
+            fighter = &mut Fighter
+            &pos    = &Vec2
+        {
+            let dist = (hero_pos - pos).length();
+            fighter.aggroed = if dist < 5.0 {
+                true
+            } else if dist > 15.0 {
+                false
+            } else {
+                fighter.aggroed
+            };
+        });
+
         enemies.extend(
-            game.ecs.query::<(&_, &_, &Fighter)>().iter().map(|(e, (x, v, _))| (e, *x, *v)),
+            ecs.query::<(&_, &_, &Fighter, &_)>()
+                .iter()
+                .filter(|(_, (_, _, f, ..))| f.aggroed)
+                .map(|(e, (p, v, f, h))| (e, *p, *v, *f, *h)),
         );
         enemies.sort_by(|a, b| {
             if Some(a.0) == *attacker {
                 std::cmp::Ordering::Less
             } else {
-                float_cmp(a, b, |&(_, p, _)| (hero_pos - p).length_squared())
+                float_cmp(a, b, |&(_, p, ..)| (hero_pos - p).length_squared())
             }
         });
 
         const SLOT_COUNT: usize = 7;
         let mut slots = [false; SLOT_COUNT];
-        for (e, pos, vel) in enemies.drain(..) {
+        for (e, pos, vel, f, hp) in enemies.drain(..) {
             let slot = circle_points(SLOT_COUNT)
                 .map(|v| (Rot(0.1).apply(v) * 2.65 + hero_pos) - pos)
                 .enumerate()
@@ -848,33 +964,39 @@ impl Waffle {
             if let Some((i, delta)) = slot {
                 slots[i] = true;
 
-                if *last_attack + 120 < tick
+                if *attack_ends < tick
                     && (Some(e) != *attacker || *occupied_slots_last_frame == 1)
                 {
                     *attacker = Some(e);
                     *last_attack = tick;
+                    *attack_ends = tick + f.attack_interval;
+                    *attack_kind = Some(f.behavior.attack_kind(hp));
                 }
 
                 if let Ok(Velocity(vel)) = game.ecs.get_mut(e).as_deref_mut() {
                     let (d, speed) = if Some(e) == *attacker && *last_attack + 40 > tick {
                         let goal = hero_pos + (pos - hero_pos).normalize() * 2.0;
-                        ((goal - pos), 0.0085)
+                        ((goal - pos), f.charge_speed)
                     } else {
-                        (delta, 0.0065)
+                        (delta, f.chase_speed)
                     };
 
                     *vel += d.min(d.normalize()) * speed;
                 }
             }
 
-            if let Ok(Some(wep_ent)) = game.ecs.get::<Bag>(e).map(|b| b.weapon) {
+            if let Ok(Some(wep_ent)) =
+                game.ecs.get_mut::<Bag>(e).map(|mut b| b.weapon.as_mut().and_then(|w| w.out()))
+            {
                 let attacks = game
                     .ecs
                     .query_one_mut::<Weapon>(wep_ent)
                     .ok()
                     .map(|mut wep| {
                         wep.tick(WeaponInput {
-                            start_attacking: *attacker == Some(e) && *last_attack == tick,
+                            start_attacking: attack_kind.filter(|_| {
+                                *attacker == Some(e) && *last_attack == tick
+                            }),
                             target: hero_pos,
                             wielder_pos: pos,
                             wielder_vel: vel.0,
@@ -885,12 +1007,23 @@ impl Waffle {
                     })
                     .unwrap_or_default();
 
-                let knockback = attacks.iter().fold(Vec2::zero(), |acc, &hit| {
-                    let (_, vel) = game.hit(hero_pos, hit);
-                    acc + vel
-                });
-                if let Ok(mut v) = game.ecs.get_mut::<Velocity>(wep_ent) {
-                    v.knockback(knockback, 0.125);
+                if let (Some(attack_kind), true) = (*attack_kind, *attacker == Some(e)) {
+                    let (damage, attacker_knockback, knockback) = match attack_kind {
+                        AttackKind::Swipe => (1, 0.125, 0.2),
+                        AttackKind::Stab => (3, 0.085, 0.28),
+                    };
+                    let delta = attacks.iter().fold(Vec2::zero(), |acc, &hit| {
+                        let (_, vel) = game.hit(HitInput {
+                            hitter_pos: pos,
+                            hit,
+                            damage,
+                            knockback,
+                        });
+                        acc + vel
+                    });
+                    if let Ok(mut v) = game.ecs.get_mut::<Velocity>(e) {
+                        v.knockback(delta, attacker_knockback);
+                    }
                 }
             }
         }
@@ -912,11 +1045,11 @@ async fn main() {
 
     let hero = ecs.spawn((
         vec2(-0.4, -3.4),
-        Velocity(Vec2::zero()),
+        Velocity::default(),
         Phys::wings(0.3, 0.21, CircleKind::Push).hurtbox(0.5),
         Art::Hero,
         Direction::Left,
-        Health(10, 10),
+        Health::full(10),
         Bag::default(),
     ));
 
@@ -929,11 +1062,8 @@ async fn main() {
     }
     impl Pen {
         fn new(ecs: &mut hecs::World, radius: f32, pos: Vec2, gate: usize) -> Self {
-            let mut pen = Self {
-                gate: unsafe { [std::mem::zeroed(), std::mem::zeroed()] },
-                radius,
-                pos,
-            };
+            let mut pen =
+                Self { gate: unsafe { [std::mem::zeroed(), std::mem::zeroed()] }, radius, pos };
             for (i, post_pos) in circle_points((PI * radius / 0.4).ceil() as usize).enumerate() {
                 let post = pen.post(post_pos);
                 let e = ecs.spawn(post.clone());
@@ -980,6 +1110,27 @@ async fn main() {
         tree(&mut ecs, p * 13.5 + vec2(-40.0, 10.0));
     }
 
+    let vv = ecs.reserve_entity();
+    or_err!(ecs.insert(
+        vv,
+        (
+            vec2(-21.5, -20.0),
+            Health::full(7),
+            HealthBar,
+            Art::VioletVagabond,
+            Fighter {
+                behavior: FighterBehavior::LowHealthStab,
+                chase_speed: 0.0085,
+                charge_speed: 0.0125,
+                attack_interval: 75,
+                ..Default::default()
+            },
+            Phys::pushfoot_bighit(),
+            Velocity::default(),
+            Bag::holding(Item::sword(vv)),
+        )
+    ));
+
     let lair_pen = Pen::new(&mut ecs, 8.0, vec2(-40.0, 10.0), 52);
     lair_pen.gate_open(&mut ecs);
 
@@ -1000,9 +1151,8 @@ async fn main() {
     });
 
     let npc2 = ecs.spawn(npc(vec2(4.0, 11.0)));
-    let npc2_guide = move |g: &Game, gi: &mut Vec<_>| {
-        gi.push((Art::Arrow, g.pos(npc2) + vec2(0.0, 0.9)))
-    };
+    let npc2_guide =
+        move |g: &Game, gi: &mut Vec<_>| gi.push((Art::Arrow, g.pos(npc2) + vec2(0.0, 0.9)));
 
     let pen = Pen::new(&mut ecs, 4.5, vec2(5.0, 5.0), 10);
     let (pen_pos, pen_radius) = (pen.pos, pen.radius);
@@ -1017,10 +1167,10 @@ async fn main() {
                     circle.next().unwrap() * r * 0.3 + pen.pos,
                     Art::TripletuftedTerrorworm,
                     Wander::around(pen.pos, r),
-                    Velocity(Vec2::zero()),
+                    Velocity::default(),
                     Innocence::Unwavering,
                     Phys::pushfoot_bighit(),
-                    Health(1, 1),
+                    Health::full(1),
                 ))
             }))
         }
@@ -1103,7 +1253,18 @@ async fn main() {
                         drop(g.ecs.remove_one::<Wander>(tw));
                         drop(g.ecs.insert(
                             tw,
-                            (Fighter, Bag::holding(Item::sword(tw)), Health(2, 2), HealthBar),
+                            (
+                                Fighter {
+                                    chase_speed: 0.0035,
+                                    charge_speed: 0.0055,
+                                    attack_interval: 140,
+                                    aggroed: true,
+                                    ..Default::default()
+                                },
+                                Bag::holding(Item::sword(tw)),
+                                Health::full(2),
+                                HealthBar,
+                            ),
                         ));
                     }
                 }),
@@ -1134,7 +1295,7 @@ async fn main() {
     let scarecrow = ecs.spawn((
         vec2(3.4, -2.4),
         Phys::pushfoot_bighit(),
-        Health(5, 5),
+        Health::full(5),
         HealthBar,
         Art::Scarecrow,
     ));
@@ -1158,12 +1319,7 @@ async fn main() {
         ..Default::default()
     });
 
-    let sword = ecs.spawn((
-        vec2(-2.5, -0.4),
-        Art::Sword,
-        Rot(FRAC_PI_2 + 0.1),
-        ZOffset(0.42),
-    ));
+    let sword = ecs.spawn((vec2(-2.5, -0.4), Art::Sword, Rot(FRAC_PI_2 + 0.1), ZOffset(0.42)));
 
     quests.add(Quest {
         title: "RPG Tropes Abound!",
@@ -1215,10 +1371,10 @@ async fn main() {
         }
 
         drawer.draw(&game);
-        if let Ok(&Health(hp, max)) = game.ecs.get(hero).as_deref() {
+        if let Ok(&hp) = game.ecs.get::<Health>(hero).as_deref() {
             let screen = vec2(screen_width(), screen_height());
             let size = vec2(screen.x() * (1.0 / 6.0), 30.0);
-            health_bar(size, hp, max, vec2(size.x() / 2.0 + 30.0, 70.0));
+            health_bar(size, hp.ratio(), vec2(size.x() / 2.0 + 30.0, 70.0));
         }
 
         quests.ui(&game);
@@ -1267,7 +1423,10 @@ impl Game {
 
     /// The tuple's first field is true if they died,
     /// the second field represents knockback.
-    fn hit(&mut self, hitter_pos: Vec2, WeaponHit { hit }: WeaponHit) -> (bool, Vec2) {
+    fn hit(
+        &mut self,
+        HitInput { hitter_pos, hit: WeaponHit { hit }, damage, knockback }: HitInput,
+    ) -> (bool, Vec2) {
         let tick = self.tick;
 
         if let Ok((Health(hp, _), vel, &pos, ino)) =
@@ -1279,21 +1438,27 @@ impl Game {
             }
 
             if let Some(v) = vel {
-                v.knockback(pos - hitter_pos, 0.2);
+                v.knockback(pos - hitter_pos, knockback);
             }
 
-            *hp -= 1;
+            *hp = hp.saturating_sub(damage);
             let dead = *hp == 0;
             if dead {
                 or_err!(self.ecs.despawn(hit));
             }
-            self.ecs.spawn((DamageLabel { tick, hp: -1, pos },));
+            self.ecs.spawn((DamageLabel { tick, hp: -(damage as i32), pos },));
 
             (dead, (hitter_pos - pos).normalize())
         } else {
             (false, Vec2::zero())
         }
     }
+}
+struct HitInput {
+    hitter_pos: Vec2,
+    hit: WeaponHit,
+    damage: u32,
+    knockback: f32,
 }
 
 struct Task {
@@ -1503,20 +1668,23 @@ impl Quests {
             let flip_y = vec2(1.0, -1.0);
             let from = (goal - top_left) * flip_y;
             let screen_size = screen * flip_y * 2.0;
-            let (mut pos, rot, scale) = if from.cmplt(screen_size).all() && from.cmpgt(Vec2::zero()).all() {
-                (goal + vec2(0.0, 1.0), Rot(PI), 1.0)
-            } else {
-                (
-                    top_left + from.max(Vec2::zero()).min(screen_size) * flip_y,
-                    Rot(Rot::from_vec2(cam.target - goal).0 + FRAC_PI_2),
-                    1.35,
-                )
-            };
+            let (mut pos, rot, scale) =
+                if from.cmplt(screen_size).all() && from.cmpgt(Vec2::zero()).all() {
+                    (goal + vec2(0.0, 1.0), Rot(PI), 1.0)
+                } else {
+                    (
+                        top_left + from.max(Vec2::zero()).min(screen_size) * flip_y,
+                        Rot(Rot::from_vec2(cam.target - goal).0 + FRAC_PI_2),
+                        1.35,
+                    )
+                };
 
             let bob = math::smoothstep((g.tick as f32 / 10.0).sin()) * 0.2;
             let v = Rot(rot.0 - FRAC_PI_2).vec2();
             pos += (v * 0.67 * scale) + (v * bob);
-            or_err!(g.ecs.insert(ent, (art, pos, rot, ZOffset(-999.0), Scale(vec2(1.0, 0.4) * scale))));
+            or_err!(g
+                .ecs
+                .insert(ent, (art, pos, rot, ZOffset(-999.0), Scale(vec2(1.0, 0.4) * scale))));
         }
     }
 
@@ -1614,9 +1782,14 @@ impl Quests {
                 let tab = {
                     let jump = self.jump_to_tab.take();
                     let titles = self.tab_titles();
-                    Tabbar::new(hash!(), Vector2::new(0.0, 0.0), Vector2::new(size.x(), tab_height), &titles)
-                        .selected_tab(jump)
-                        .ui(ui)
+                    Tabbar::new(
+                        hash!(),
+                        Vector2::new(0.0, 0.0),
+                        Vector2::new(size.x(), tab_height),
+                        &titles,
+                    )
+                    .selected_tab(jump)
+                    .ui(ui)
                 };
 
                 self.new_tabs[tab as usize] = false;
@@ -1704,7 +1877,7 @@ impl DamageLabelBin {
     }
 }
 
-fn health_bar(size: Vec2, hp: u32, max: u32, pos: Vec2) {
+fn health_bar(size: Vec2, ratio: f32, pos: Vec2) {
     fn lerp_color(Color(a): Color, Color(b): Color, t: f32) -> Color {
         pub fn lerp(a: u8, b: u8, t: f32) -> u8 {
             a + (((b - a) as f32 / 255.0 * t) * 255.0) as u8
@@ -1714,7 +1887,6 @@ fn health_bar(size: Vec2, hp: u32, max: u32, pos: Vec2) {
 
     let (x, y) = (pos - size * vec2(0.5, 1.4)).into();
     let (w, h) = size.into();
-    let ratio = hp as f32 / max as f32;
     let mut color =
         if ratio < 0.5 { lerp_color(RED, YELLOW, ratio) } else { lerp_color(YELLOW, GREEN, ratio) };
     color.0[3] = 150;
@@ -1786,7 +1958,9 @@ impl Drawer {
         sprites.extend(
             ecs.query::<(&_, &_, Option<&ZOffset>, Option<&Rot>, Option<&Scale>)>()
                 .iter()
-                .map(|(_, (&p, &a, z, r, s))| (p, a, z.copied().unwrap_or_default(), r.copied(), s.copied()))
+                .map(|(_, (&p, &a, z, r, s))| {
+                    (p, a, z.copied().unwrap_or_default(), r.copied(), s.copied())
+                })
                 .filter(|&(p, art, _, rot, _): &SpriteData| {
                     let (x, m) = rot.map(|_| (0.0, 2.0)).unwrap_or((1.0, 1.0));
                     let bound = Vec2::splat(art.bounding() * m);
@@ -1802,7 +1976,7 @@ impl Drawer {
                         * rot.map(|Rot(r)| glam::Mat4::from_rotation_z(r)).unwrap_or_default()
                         * scale
                             .map(|Scale(v)| glam::Mat4::from_scale(glam::vec3(v.x(), v.y(), 1.0)))
-                            .unwrap_or_default()
+                            .unwrap_or_default(),
                 );
             };
 
@@ -1815,6 +1989,7 @@ impl Drawer {
                 Art::Hero => rect(BLUE, 1.0, 1.0),
                 Art::Scarecrow => rect(GOLD, 0.8, 0.8),
                 Art::TripletuftedTerrorworm => rect(WHITE, 0.8, 0.8),
+                Art::VioletVagabond => rect(VIOLET, 0.8, 0.8),
                 Art::Npc => rect(GREEN, 1.0, GOLDEN_RATIO),
                 Art::Tree => {
                     let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
@@ -1833,12 +2008,7 @@ impl Drawer {
                 }
                 Art::Arrow => {
                     push_model_matrix();
-                    draw_triangle(
-                        vec2(0.11, 0.0),
-                        vec2(-0.11, 0.0),
-                        vec2(0.00, GOLDEN_RATIO),
-                        RED,
-                    );
+                    draw_triangle(vec2(0.11, 0.0), vec2(-0.11, 0.0), vec2(0.00, GOLDEN_RATIO), RED);
                     draw_triangle(
                         vec2(-0.225, 0.85),
                         vec2(0.225, 0.85),
@@ -1853,7 +2023,7 @@ impl Drawer {
                         vec2(0.075, 0.0),
                         vec2(-0.075, 0.0),
                         vec2(0.00, GOLDEN_RATIO),
-                        BROWN,
+                        DARKBROWN,
                     );
                     for &dir in &[-1.0, 1.0] {
                         draw_triangle(
@@ -1879,11 +2049,11 @@ impl Drawer {
         }
 
         system!(ecs, _,
-            &Health(hp, max) = &_
-            &HealthBar       = &_
-            &pos             = &Vec2
+            &hp        = &Health
+            &HealthBar = &_
+            &pos       = &Vec2
         {
-            health_bar(vec2(1.0, 0.2), hp, max, pos);
+            health_bar(vec2(1.0, 0.2), hp.ratio(), pos);
         });
 
         #[cfg(feature = "show-collide")]
