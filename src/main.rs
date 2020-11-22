@@ -1926,7 +1926,6 @@ impl Quests {
             Label::new(quest.unlock_description).multiline(14.0).ui(ui);
             if ui.button(None, "Accept") {
                 quest.completion.accept(tick);
-                self.new_tabs[1] = true;
             }
             ui.separator();
         }
@@ -1940,6 +1939,9 @@ impl Quests {
             open_tree(ui, hash!(i), quest.title, |ui| {
                 for task in &quest.tasks {
                     ui.label(None, &task.label);
+                    if !task.finished {
+                        return
+                    }
                 }
             });
             ui.separator();
