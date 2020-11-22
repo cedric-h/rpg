@@ -280,13 +280,20 @@ impl Physics {
 
 #[derive(Debug, Clone)]
 enum BagWeapon {
-    Out(hecs::Entity),
+    Out { ent: hecs::Entity, art: Art, wants_in: bool },
     In { item: Item, wants_out: bool },
 }
 impl BagWeapon {
+    fn art(&self) -> Art {
+        match self {
+            BagWeapon::Out { art, .. } => *art,
+            BagWeapon::In { item, .. } => item.art,
+        }
+    }
+
     fn out(&mut self) -> Option<hecs::Entity> {
         match self {
-            &mut BagWeapon::Out(e) => Some(e),
+            &mut BagWeapon::Out { ent, .. } => Some(ent),
             BagWeapon::In { wants_out, .. } => {
                 *wants_out = true;
                 None
@@ -294,16 +301,40 @@ impl BagWeapon {
         }
     }
 
+    fn item(&mut self) -> Option<&Item> {
+        match self {
+            BagWeapon::Out { wants_in, .. } => {
+                *wants_in = true;
+                None
+            }
+            BagWeapon::In { item, .. } => Some(&*item),
+        }
+    }
+
     fn wants_out(&self) -> bool {
         match self {
-            BagWeapon::Out(_) => false,
+            BagWeapon::Out { .. } => false,
             BagWeapon::In { wants_out, .. } => *wants_out,
+        }
+    }
+
+    fn wants_in(&self) -> bool {
+        match self {
+            BagWeapon::Out { wants_in, .. } => *wants_in,
+            BagWeapon::In { .. } => false,
+        }
+    }
+
+    fn ent(&self) -> Option<hecs::Entity> {
+        match self {
+            BagWeapon::Out { ent, .. } => Some(*ent),
+            BagWeapon::In { .. } => None,
         }
     }
 
     fn take_item(self) -> Option<Item> {
         match self {
-            BagWeapon::Out(_) => None,
+            BagWeapon::Out { .. } => None,
             BagWeapon::In { item, .. } => Some(item),
         }
     }
@@ -312,8 +343,8 @@ impl BagWeapon {
 #[derive(Debug, Default, Clone)]
 struct Bag {
     weapon: Option<BagWeapon>,
-    temp_weapon: Option<Item>,
-    slots: [Option<Item>; 3],
+    slots: [Option<Item>; 24],
+    trinkets: [Option<Item>; 4],
 }
 impl Bag {
     fn holding(item: Item) -> Self {
@@ -323,7 +354,7 @@ impl Bag {
     }
 
     fn take(&mut self, item: Item) {
-        if self.weapon.is_none() && self.temp_weapon.is_none() {
+        if self.weapon.is_none() {
             self.weapon = Some(BagWeapon::In { item, wants_out: false });
         } else {
             let empty_slot = self.slots.iter_mut().find(|s| s.is_none());
@@ -336,30 +367,225 @@ impl Bag {
     }
 }
 
+#[derive(Debug)]
+enum SlotAction {
+    ReplaceWith(Item),
+    MoveTo(u64),
+    Stay,
+}
+
+struct BagUi {
+    moves: Vec<(u64, Item)>,
+    moving_weapon: Option<u64>,
+    icon_ent: hecs::Entity,
+    icon_jumping: bool,
+    window_open: bool,
+    dragging: bool,
+}
+impl BagUi {
+    fn new(ecs: &mut hecs::World) -> Self {
+        Self {
+            moves: Vec::with_capacity(100),
+            icon_ent: ecs.spawn((vec2(0.0, 0.0), Art::Lockbox, ZOffset(-999.0))),
+            icon_jumping: false,
+            window_open: false,
+            moving_weapon: None,
+            dragging: false,
+        }
+    }
+
+    fn update_icon(&mut self, g: &mut Game, drawer: &Drawer) {
+        if let Ok(mut pos) = g.ecs.get_mut::<Vec2>(self.icon_ent) {
+            let bob =
+                if self.icon_jumping { (g.tick as f32 / 8.0).sin().abs() * 0.25 } else { 0.0 };
+            *pos = drawer.cam.target - drawer.screen * vec2(1.0, -1.0) + vec2(1.5, 0.1 + bob);
+
+            if is_key_pressed(KeyCode::E)
+                || g.mouse_down_tick == Some(g.tick)
+                    && (*pos + vec2(0.0, 0.5) - g.mouse_pos).length() < 0.5
+            {
+                self.window_open = !self.window_open;
+            }
+        }
+    }
+
+    fn size() -> Vec2 {
+        vec2(510.0, 250.0)
+    }
+
+    fn slot(&mut self, ui: &mut megaui::Ui, id: u64, art: Option<Art>, p: Vec2) -> SlotAction {
+        use megaui::{widgets::Group, Drag, Vector2};
+
+        let (x, y) = p.into();
+        let drag = Group::new(id, Vector2::new(50., 50.))
+            .position(Vector2::new(x, y))
+            .draggable(art.is_some())
+            .hoverable(self.dragging)
+            .highlight(self.dragging)
+            .ui(ui, |ui| {
+                ui.label(
+                    Vector2::new(5., 10.),
+                    &art.as_ref().map(|a| format!("{:#?}", a)).unwrap_or_else(|| "".to_string()),
+                );
+            });
+
+        if let Some((_, item)) = self.moves.drain_filter(|(m_id, _)| *m_id == id).next() {
+            return SlotAction::ReplaceWith(item);
+        }
+
+        match drag {
+            Drag::Dropped(_, id) => {
+                self.dragging = false;
+                if let Some(id) = id {
+                    return SlotAction::MoveTo(id);
+                }
+            }
+            Drag::Dragging(_, _) => self.dragging = true,
+            Drag::No => {}
+        }
+
+        SlotAction::Stay
+    }
+
+    fn ui(&mut self, bag: &mut Bag) {
+        use megaui_macroquad::{
+            draw_window,
+            megaui::{hash, widgets::Group, Vector2},
+            WindowParams,
+        };
+
+        if !self.window_open {
+            return;
+        }
+
+        if self.moving_weapon.is_some() && bag.weapon.as_mut().and_then(|w| w.item()).is_some() {
+            if let (Some(id), Some(item)) =
+                (self.moving_weapon.take(), bag.weapon.take().and_then(|w| w.take_item()))
+            {
+                self.moves.push((id, item));
+            }
+        }
+
+        let size = Self::size();
+        self.window_open = draw_window(
+            hash!(),
+            vec2(screen_width(), screen_height()) / 2.0 - size * vec2(0.6, 0.1),
+            size,
+            WindowParams { label: "Items - toggle with E".to_string(), ..Default::default() },
+            |ui| {
+                Group::new(hash!("equipped box"), Vector2::new(size.x() * 0.3, size.y() - 25.0))
+                    .position(Vector2::new(5.0, 5.0))
+                    .ui(ui, |ui| {
+                        ui.label(Vector2::new(80.0, 35.0), "<- Weapon");
+                        match self.slot(
+                            ui,
+                            hash!("weapon slot"),
+                            bag.weapon.as_ref().map(|w| w.art()),
+                            vec2(20.0, 20.0),
+                        ) {
+                            SlotAction::ReplaceWith(item) => {
+                                bag.weapon = None;
+                                bag.take(item);
+                            }
+                            SlotAction::MoveTo(id) => self.moving_weapon = Some(id),
+                            SlotAction::Stay => {}
+                        }
+
+                        ui.label(Vector2::new(40.0, 85.0), "Trinkets");
+                        for (i, item) in bag.trinkets.iter_mut().enumerate() {
+                            match self.slot(
+                                ui,
+                                hash!("trinket slot", i),
+                                item.as_ref().map(|s| s.art),
+                                vec2(
+                                    (i % 2) as f32 * 55.0 + 20.0,
+                                    (i as f32 / 2.0).floor() * 55.0 + 105.0,
+                                ),
+                            ) {
+                                SlotAction::ReplaceWith(i) => *item = Some(i),
+                                SlotAction::MoveTo(id) => {
+                                    if let Some(item) = item.take() {
+                                        self.moves.push((id, item));
+                                    }
+                                }
+                                SlotAction::Stay => {}
+                            }
+                        }
+                    });
+
+                for (i, item) in bag.slots.iter_mut().enumerate() {
+                    match self.slot(
+                        ui,
+                        hash!("bag slot", i),
+                        item.as_ref().map(|s| s.art),
+                        vec2(
+                            (i % 6) as f32 * 55.0 + size.x() * 0.3 + 20.0,
+                            (i as f32 / 6.0).floor() * 55.0 + 10.0,
+                        ),
+                    ) {
+                        SlotAction::ReplaceWith(i) => *item = Some(i),
+                        SlotAction::MoveTo(id) => {
+                            if let Some(item) = item.take() {
+                                self.moves.push((id, item));
+                            }
+                        }
+                        SlotAction::Stay => {}
+                    }
+                }
+            },
+        );
+    }
+}
+
+struct WantsIn {
+    bag_ent: hecs::Entity,
+    wep_ent: hecs::Entity,
+}
+
 struct KeeperOfBags {
-    temp: Vec<(hecs::Entity, Item)>,
+    wants_out: Vec<(hecs::Entity, Item)>,
+    wants_in: Vec<WantsIn>,
     ownerless: Vec<hecs::Entity>,
 }
 impl KeeperOfBags {
     fn new() -> Self {
-        Self { temp: Vec::with_capacity(100), ownerless: Vec::with_capacity(100) }
+        Self {
+            wants_out: Vec::with_capacity(100),
+            wants_in: Vec::with_capacity(100),
+            ownerless: Vec::with_capacity(100),
+        }
     }
 
     fn keep(&mut self, ecs: &mut hecs::World) {
-        let Self { temp, ownerless } = self;
-        temp.extend(
+        let Self { wants_out, wants_in, ownerless } = self;
+        wants_out.extend(
             ecs.query::<&mut Bag>()
                 .iter()
                 .filter(|(_, b)| b.weapon.as_ref().map(|b| b.wants_out()).unwrap_or(false))
                 .filter_map(|(_, b)| {
                     let item = b.weapon.take()?.take_item()?;
-                    let e = ecs.reserve_entity();
-                    b.weapon = Some(BagWeapon::Out(e));
-                    Some((e, item))
+                    let ent = ecs.reserve_entity();
+                    b.weapon = Some(BagWeapon::Out { ent, art: item.art, wants_in: false });
+                    Some((ent, item))
                 }),
         );
-        for (ent, weapon) in temp.drain(..) {
+        for (ent, weapon) in wants_out.drain(..) {
             or_err!(ecs.insert(ent, weapon));
+        }
+
+        wants_in.extend(
+            ecs.query::<&mut Bag>()
+                .iter()
+                .filter(|(_, b)| b.weapon.as_ref().map(|b| b.wants_in()).unwrap_or(false))
+                .filter_map(|(e, b)| {
+                    Some(WantsIn { bag_ent: e, wep_ent: b.weapon.as_ref().and_then(|w| w.ent())? })
+                }),
+        );
+        for WantsIn { bag_ent, wep_ent } in wants_in.drain(..) {
+            let item = ecs.remove(wep_ent);
+            if let (Ok(item), Ok(mut bag)) = (item, ecs.get_mut::<Bag>(bag_ent)) {
+                bag.weapon = Some(BagWeapon::In { item, wants_out: false });
+            }
         }
 
         ownerless.extend(
@@ -690,8 +916,11 @@ const GOLDEN_RATIO: f32 = 1.618034;
 #[derive(Copy, Clone, Debug)]
 enum Art {
     Hero,
+    Compass,
     Scarecrow,
     Arrow,
+    Chest,
+    Lockbox,
     TripletuftedTerrorworm,
     VioletVagabond,
     Tree,
@@ -712,6 +941,9 @@ impl Art {
             Art::Hero => 0.5,
             Art::Scarecrow => 0.4,
             Art::Arrow => GOLDEN_RATIO / 2.0,
+            Art::Chest => GOLDEN_RATIO / 2.0,
+            Art::Lockbox => 0.5,
+            Art::Compass => 0.5,
             Art::TripletuftedTerrorworm => 0.4,
             Art::VioletVagabond => 0.4,
             Art::Tree => 2.0,
@@ -834,9 +1066,8 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
         .and_then(|e| game.ecs.query_one_mut::<Weapon>(e).ok())
         .map(|mut wep| {
             wep.tick(WeaponInput {
-                start_attacking: Some(AttackKind::Swipe).filter(|_| {
-                    !mouse_over_ui() && is_mouse_button_down(MouseButton::Left)
-                }),
+                start_attacking: Some(AttackKind::Swipe)
+                    .filter(|_| !mouse_over_ui() && is_mouse_button_down(MouseButton::Left)),
                 target: mouse_pos,
                 wielder_pos: hero_pos,
                 wielder_vel: hero_vel,
@@ -848,12 +1079,8 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
         .unwrap_or_default();
 
     let knockback = hero_attacks.iter().fold(Vec2::zero(), |acc, &hit| {
-        let (dead, vel) = game.hit(HitInput {
-            hitter_pos: hero_pos,
-            hit,
-            damage: 1,
-            knockback: 0.2,
-        });
+        let (dead, vel) =
+            game.hit(HitInput { hitter_pos: hero_pos, hit, damage: 1, knockback: 0.2 });
         if dead {
             quests.update(game);
         }
@@ -871,7 +1098,7 @@ enum FighterBehavior {
 }
 impl FighterBehavior {
     fn attack_kind(self, hp: Health) -> AttackKind {
-        use { FighterBehavior::*, AttackKind::* };
+        use {AttackKind::*, FighterBehavior::*};
         match self {
             LowHealthStab if hp.ratio() < 0.5 => Stab,
             _ => Swipe,
@@ -921,7 +1148,14 @@ impl Waffle {
 
     fn update(&mut self, game: &mut Game) {
         let &mut Game { hero_pos, tick, .. } = game;
-        let Self { enemies, attack_ends, last_attack, attack_kind, attacker, occupied_slots_last_frame } = self;
+        let Self {
+            enemies,
+            attack_ends,
+            last_attack,
+            attack_kind,
+            attacker,
+            occupied_slots_last_frame,
+        } = self;
 
         let ecs = &mut game.ecs;
         system!(ecs, _,
@@ -964,8 +1198,7 @@ impl Waffle {
             if let Some((i, delta)) = slot {
                 slots[i] = true;
 
-                if *attack_ends < tick
-                    && (Some(e) != *attacker || *occupied_slots_last_frame == 1)
+                if *attack_ends < tick && (Some(e) != *attacker || *occupied_slots_last_frame == 1)
                 {
                     *attacker = Some(e);
                     *last_attack = tick;
@@ -994,9 +1227,8 @@ impl Waffle {
                     .ok()
                     .map(|mut wep| {
                         wep.tick(WeaponInput {
-                            start_attacking: attack_kind.filter(|_| {
-                                *attacker == Some(e) && *last_attack == tick
-                            }),
+                            start_attacking: attack_kind
+                                .filter(|_| *attacker == Some(e) && *last_attack == tick),
                             target: hero_pos,
                             wielder_pos: pos,
                             wielder_vel: vel.0,
@@ -1013,12 +1245,8 @@ impl Waffle {
                         AttackKind::Stab => (3, 0.085, 0.28),
                     };
                     let delta = attacks.iter().fold(Vec2::zero(), |acc, &hit| {
-                        let (_, vel) = game.hit(HitInput {
-                            hitter_pos: pos,
-                            hit,
-                            damage,
-                            knockback,
-                        });
+                        let (_, vel) =
+                            game.hit(HitInput { hitter_pos: pos, hit, damage, knockback });
                         acc + vel
                     });
                     if let Ok(mut v) = game.ecs.get_mut::<Velocity>(e) {
@@ -1037,7 +1265,8 @@ async fn main() {
     let mut drawer = Drawer::new();
     let mut waffle = Waffle::new();
     let mut physics = Physics::new();
-    let mut quests = Quests::new();
+    let mut bag_ui = BagUi::new(&mut ecs);
+    let mut quests = Quests::new(&mut ecs);
     let mut keeper_of_bags = KeeperOfBags::new();
     let mut fps = Fps::new();
 
@@ -1051,6 +1280,13 @@ async fn main() {
         Direction::Left,
         Health::full(10),
         Bag::default(),
+    ));
+    ecs.spawn((
+        vec2(0.0, 0.0),
+        Art::Chest,
+        Phys::pushfoot_bighit(),
+        Velocity::default(),
+        Health::full(5),
     ));
 
     type Post = (Vec2, Art, Phys);
@@ -1349,7 +1585,13 @@ async fn main() {
     const STEP_EVERY: f64 = 1.0 / 60.0;
     let mut time = STEP_EVERY;
     let mut step = get_time();
-    let mut game = Game { ecs, hero_pos: Vec2::zero(), tick: 0, mouse_pos: Vec2::zero() };
+    let mut game = Game {
+        ecs,
+        hero_pos: Vec2::zero(),
+        tick: 0,
+        mouse_pos: Vec2::zero(),
+        mouse_down_tick: None,
+    };
     loop {
         time += get_time() - step;
         step = get_time();
@@ -1357,10 +1599,17 @@ async fn main() {
             time -= STEP_EVERY;
             game.tick = game.tick.wrapping_add(1);
             game.mouse_pos = drawer.cam.screen_to_world(mouse_position().into());
+            if !is_mouse_button_down(MouseButton::Left) {
+                game.mouse_down_tick = None;
+            }
+            if is_mouse_button_down(MouseButton::Left) && game.mouse_down_tick.is_none() {
+                game.mouse_down_tick = Some(game.tick);
+            }
 
             physics.tick(&mut game.ecs);
             quests.update(&mut game);
-            quests.update_guides(&mut game, &drawer.cam);
+            quests.update_guides(&mut game, &drawer);
+            bag_ui.update_icon(&mut game, &drawer);
             waffle.update(&mut game);
             keeper_of_bags.keep(&mut game.ecs);
             wander(&mut game.ecs);
@@ -1378,6 +1627,9 @@ async fn main() {
         }
 
         quests.ui(&game);
+        if let Ok(bag) = game.ecs.get_mut(hero).as_deref_mut() {
+            bag_ui.ui(bag);
+        }
         megaui_macroquad::draw_megaui();
 
         fps.update();
@@ -1392,6 +1644,7 @@ struct Game {
     hero_pos: Vec2,
     /// In game coordinates
     mouse_pos: Vec2,
+    mouse_down_tick: Option<u32>,
     tick: u32,
 }
 impl Game {
@@ -1568,6 +1821,7 @@ impl QuestVec {
         self.0.iter_mut().enumerate().filter_map(|(i, q)| Some((q.completion.accepted()?, i, q)))
     }
 
+    #[allow(dead_code)]
     fn finished_mut(&mut self) -> impl Iterator<Item = (u32, usize, &mut Quest)> {
         self.0.iter_mut().enumerate().filter_map(|(i, q)| Some((q.completion.finished()?, i, q)))
     }
@@ -1601,20 +1855,24 @@ struct Quests {
     tab_titles: [String; 3],
     new_tabs: [bool; 3],
     jump_to_tab: Option<usize>,
+    window_open: bool,
     guides: Vec<(Art, Vec2)>,
     guide_ents: Vec<hecs::Entity>,
+    icon_ent: hecs::Entity,
 }
 impl Quests {
-    fn new() -> Self {
+    fn new(ecs: &mut hecs::World) -> Self {
         Self {
             quests: QuestVec(Vec::with_capacity(100)),
             auto_accept: false,
             temp: Vec::with_capacity(100),
             tab_titles: [(); 3].map(|_| String::with_capacity(25)),
-            new_tabs: [false; 3],
+            new_tabs: [true, false, false],
             jump_to_tab: None,
+            window_open: false,
             guide_ents: Vec::with_capacity(100),
             guides: Vec::with_capacity(100),
+            icon_ent: ecs.spawn((vec2(0.0, 0.0), Art::Compass, ZOffset(-999.0))),
         }
     }
 
@@ -1651,21 +1909,21 @@ impl Quests {
         }
     }
 
-    fn update_guides(&mut self, g: &mut Game, cam: &Camera2D) {
+    fn update_guides(&mut self, g: &mut Game, drawer: &Drawer) {
         let Self { guides, guide_ents, .. } = self;
         for (_, &e) in guide_ents.iter().enumerate().skip_while(|&(i, _)| i < guides.len()) {
             drop(g.ecs.remove::<(Art, Vec2)>(e));
         }
+
+        let screen = drawer.screen;
+        let top_left = drawer.cam.target - screen;
+        let flip_y = vec2(1.0, -1.0);
         for (i, (art, goal)) in guides.drain(..).enumerate() {
             let ent = guide_ents.get(i).copied().unwrap_or_else(|| {
                 let e = g.ecs.reserve_entity();
                 guide_ents.push(e);
                 e
             });
-            let screen = cam.screen_to_world(vec2(screen_width(), screen_height())) - cam.target;
-            let top_left = cam.target - screen;
-
-            let flip_y = vec2(1.0, -1.0);
             let from = (goal - top_left) * flip_y;
             let screen_size = screen * flip_y * 2.0;
             let (mut pos, rot, scale) =
@@ -1674,7 +1932,7 @@ impl Quests {
                 } else {
                     (
                         top_left + from.max(Vec2::zero()).min(screen_size) * flip_y,
-                        Rot(Rot::from_vec2(cam.target - goal).0 + FRAC_PI_2),
+                        Rot(Rot::from_vec2(drawer.cam.target - goal).0 + FRAC_PI_2),
                         1.35,
                     )
                 };
@@ -1685,6 +1943,22 @@ impl Quests {
             or_err!(g
                 .ecs
                 .insert(ent, (art, pos, rot, ZOffset(-999.0), Scale(vec2(1.0, 0.4) * scale))));
+        }
+
+        if let Ok(mut pos) = g.ecs.get_mut::<Vec2>(self.icon_ent) {
+            let bob = if self.new_tabs.iter().any(|&b| b) {
+                (g.tick as f32 / 8.0).sin().abs() * 0.25
+            } else {
+                0.0
+            };
+            *pos = drawer.cam.target - screen * flip_y + vec2(0.5, 0.1 + bob);
+
+            if is_key_pressed(KeyCode::Q)
+                || g.mouse_down_tick == Some(g.tick)
+                    && (*pos + vec2(0.0, 0.5) - g.mouse_pos).length() < 0.5
+            {
+                self.window_open = !self.window_open;
+            }
         }
     }
 
@@ -1771,12 +2045,20 @@ impl Quests {
             WindowParams,
         };
 
+        if !self.window_open {
+            return;
+        }
+
         let size = Self::size();
-        draw_window(
+        self.window_open = draw_window(
             hash!(),
             vec2(screen_width(), screen_height()) / 2.0 - size * vec2(0.5, -0.1),
             size,
-            WindowParams { label: "Quests".to_string(), ..Default::default() },
+            WindowParams {
+                label: "Quests - toggle with Q".to_string(),
+                close_button: true,
+                ..Default::default()
+            },
             |ui| {
                 let tab_height = 22.5;
                 let tab = {
@@ -1900,12 +2182,14 @@ struct Drawer {
     sprites: Vec<SpriteData>,
     damage_labels: DamageLabelBin,
     cam: Camera2D,
+    screen: Vec2,
 }
 impl Drawer {
     fn new() -> Self {
         Self {
             sprites: Vec::with_capacity(1000),
             cam: Default::default(),
+            screen: Vec2::zero(),
             damage_labels: DamageLabelBin::new(),
         }
     }
@@ -1923,11 +2207,11 @@ impl Drawer {
     }
 
     fn sprites(&mut self, Game { ecs, .. }: &Game) {
-        let Self { sprites, cam, .. } = self;
+        let Self { screen, sprites, cam, .. } = self;
         cam.zoom = vec2(1.0, screen_width() / screen_height()) / 7.8;
         set_camera(*cam);
-        let screen = cam.screen_to_world(vec2(screen_width(), screen_height())) - cam.target;
-        let top_left = cam.target - screen;
+        *screen = cam.screen_to_world(vec2(screen_width(), screen_height())) - cam.target;
+        let top_left = cam.target - *screen;
 
         #[cfg(feature = "show-culling")]
         {
@@ -1953,7 +2237,7 @@ impl Drawer {
         let gl = unsafe { get_internal_gl().quad_gl };
 
         let flip_y = vec2(1.0, -1.0);
-        let screen_size = screen * flip_y * 2.0;
+        let screen_size = *screen * flip_y * 2.0;
 
         sprites.extend(
             ecs.query::<(&_, &_, Option<&ZOffset>, Option<&Rot>, Option<&Scale>)>()
@@ -1991,6 +2275,48 @@ impl Drawer {
                 Art::TripletuftedTerrorworm => rect(WHITE, 0.8, 0.8),
                 Art::VioletVagabond => rect(VIOLET, 0.8, 0.8),
                 Art::Npc => rect(GREEN, 1.0, GOLDEN_RATIO),
+                Art::Chest => {
+                    let (w, h) = (vec2(GOLDEN_RATIO, 1.0) * 0.8).into();
+                    draw_rectangle(x - w / 2.0, y, w, h, BROWN);
+                    draw_line(x - w / 2.0, y + 0.435, x + w / 2.0, y + 0.435, 0.05, DARKGRAY);
+                    draw_rectangle_lines(x - w / 2.0, y, w, h, 0.1, DARKGRAY);
+                    draw_circle(x, y + h / 2.0, 0.10, GOLD);
+                    draw_circle(x, y + h / 2.0, 0.06, DARKGRAY);
+                    draw_rectangle(x - 0.1, y + h / 2.0 - 0.135, 0.2, 0.135, GOLD);
+                }
+                Art::Compass => {
+                    draw_circle(x, y + 0.40, 0.4000, DARKGRAY);
+                    draw_circle(x, y + 0.40, 0.3055, GRAY);
+                    draw_triangle(
+                        vec2(x - 0.085, y + 0.275),
+                        vec2(x + 0.085, y + 0.275),
+                        vec2(x + 0.025, y + 0.65),
+                        LIGHTGRAY,
+                    );
+                    draw_triangle(
+                        vec2(x - 0.085, y + 0.275),
+                        vec2(x + 0.085, y + 0.275),
+                        vec2(x, y + 0.185),
+                        LIGHTGRAY,
+                    );
+                }
+                Art::Lockbox => {
+                    let (w, h) = (0.8, 0.435);
+                    draw_circle(x, y + h, 0.4, DARKGRAY);
+                    draw_circle(x, y + h, 0.4 - 0.0945, GRAY);
+                    draw_rectangle(x - w / 2.0, y, w, h, GRAY);
+                    draw_rectangle_lines(x - w / 2.0, y, w, h, 0.0945 * 2.0, DARKGRAY);
+                    let lock = 1.35;
+                    draw_circle(x, y + h - 0.08, 0.10 * lock, LIGHTGRAY);
+                    draw_circle(x, y + h - 0.08, 0.06 * lock, DARKGRAY);
+                    draw_rectangle(
+                        x - 0.1 * lock,
+                        y + h - 0.201 * lock,
+                        0.2 * lock,
+                        0.135 * lock,
+                        LIGHTGRAY,
+                    );
+                }
                 Art::Tree => {
                     let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
                     draw_circle(x, y + r, r, BROWN);
