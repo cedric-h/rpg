@@ -801,7 +801,7 @@ impl Weapon<'_> {
             AttackKind::Stab => [
                 (3.00, Some(rot)        , Some(hand_pos               ), false), // ready   
                 (2.00, None             , Some(hand_pos - toward * 0.2), false), // back up 
-                (1.00, None             , Some(hand_pos + toward * 0.8), true ), // stab   
+                (1.00, None             , Some(hand_pos + toward * 1.2), true ), // stab   
                 (2.50, None             , Some(hand_pos               ), false), // recovery
                 (2.50, Some(start_rot.0), Some(start_pos              ), false), // return  
             ]
@@ -1370,19 +1370,33 @@ async fn main() {
     let lair_pen = Pen::new(&mut ecs, 8.0, vec2(-40.0, 10.0), 52);
     lair_pen.gate_open(&mut ecs);
 
-    let rpg_tropes_4 = quests.add(Quest {
-        title: "RPG Tropes IV - Honeycoated Heptahorns",
-        completion_quip: "damn son",
-        unlock_description: concat!(
-            "Your admirable conduct has confirmed our prophecies. The slaughtered \n",
-            "Tripletufted Terrorworms have simply returned. They will continue to \n",
-            "grow in number until this pen, and eventually our simple way of life, \n",
-            "is consumed by them. It is fortold that the only way we can stop them \n",
-            "is by forging the Honeycoated Heptahorn. \n",
-            "In order to craft one, we will need a number of live bees, but naturally, \n",
-            "the only bug net in the village has has been stolen by the Spider Queen, \n",
-            "who guards it in her lair."
-        ),
+    let mut tasks = vec![];
+
+    let sword = ecs.spawn((vec2(-2.5, -0.4), Art::Sword, Rot(FRAC_PI_2 + 0.1), ZOffset(0.42)));
+
+    tasks.push(Task {
+        label: "Navigate to the Sword",
+        req: Box::new(move |g| g.hero_dist(g.pos(sword) - vec2(0.8, 0.7)) < 1.3),
+        guide: Box::new(move |g, gi| gi.push((Art::Arrow, g.pos(sword) - vec2(0.8, 0.7)))),
+        on_finish: Box::new(move |g| {
+            or_err!(g.ecs.despawn(sword));
+            or_err!(g.give_item(hero, Item::sword(hero)))
+        }),
+        ..Default::default()
+    });
+
+    ecs.spawn(npc(vec2(-4.0, 0.0)));
+    let scarecrow = ecs.spawn((
+        vec2(3.4, -2.4),
+        Phys::pushfoot_bighit(),
+        Health::full(5),
+        HealthBar,
+        Art::Scarecrow,
+    ));
+    tasks.push(Task {
+        label: "Destroy Scarecrow",
+        req: Box::new(move |g| g.dead(scarecrow)),
+        guide: Box::new(move |g, gi| gi.push((Art::Sword, g.pos(scarecrow)))),
         ..Default::default()
     });
 
@@ -1432,153 +1446,98 @@ async fn main() {
     }
     let terrorworms = Terrorworms::new(&mut ecs, pen);
 
-    let rpg_tropes_3 = quests.add(Quest {
-        title: "RPG Tropes III - Tripletufted Terrorworms",
-        completion_quip: "Of course they just come back ... we need a Honeycoated Heptahorn!",
-        unlock_description: concat!(
-            "As you have proven yourself capable of obliterating inanimate \n",
-            "objects which are rarely fearsome enough even to repel birds \n",
-            "characterized by their extreme cowardice, any doubts I may have had as \n",
-            "to your ability to save us from inescapable doom are certainly assuaged. \n",
-            "I urge you to talk to NPC 2, who will open the gate for you. Once inside \n",
-            "the pen, attempt to slaughter the innocent looking creatures inside. \n",
-            "Show no remorse, adventurer. Soon our plight will be known to you.",
-        ),
-        tasks: vec![
-            Task {
-                label: "Talk to NPC 2",
-                req: Box::new(move |g| g.hero_dist_ent(npc2) < 1.3),
-                guide: Box::new(npc2_guide),
-                on_finish: Box::new(move |g| pen.gate_open(&mut g.ecs)),
-                ..Default::default()
-            },
-            Task {
-                label: "Enter the Pen",
-                req: Box::new(move |g| g.hero_dist(pen_pos) < pen_radius * 0.8),
-                guide: Box::new(move |_, gi| gi.push((Art::Arrow, pen_pos))),
-                on_finish: Box::new(move |g| {
-                    for &tw in &terrorworms.0 {
-                        drop(g.innocent_for(tw, 1));
-                    }
-                    pen.gate_close(&mut g.ecs)
-                }),
-                ..Default::default()
-            },
-            Task {
-                label: "Slaughter the first one",
-                req: Box::new(move |g| terrorworms.dead(g).count() == 1),
-                guide: Box::new(move |g, gi| gi.extend(terrorworms.guides(g))),
-                on_finish: Box::new(move |g| {
-                    for &tw in &terrorworms.0 {
-                        drop(g.innocent_for(tw, 10));
-                        if let Ok(Wander { goal, speed, .. }) = g.ecs.get_mut(tw).as_deref_mut() {
-                            *goal = rand_vec2() * pen_radius + pen_pos;
-                            *speed *= 2.5;
-                        }
-                    }
-                }),
-                ..Default::default()
-            },
-            Task {
-                label: "Shit boutta get real",
-                req: Box::new(move |g| terrorworms.dead(g).count() == 2),
-                guide: Box::new(move |g, gi| gi.extend(terrorworms.guides(g))),
-                on_finish: Box::new(move |g| {
-                    for &tw in &terrorworms.0 {
-                        drop(g.innocent_for(tw, 10));
-                        drop(g.ecs.remove_one::<Wander>(tw));
-                        drop(g.ecs.insert(
-                            tw,
-                            (
-                                Fighter {
-                                    chase_speed: 0.0035,
-                                    charge_speed: 0.0055,
-                                    attack_interval: 140,
-                                    aggroed: true,
-                                    ..Default::default()
-                                },
-                                Bag::holding(Item::sword(tw)),
-                                Health::full(2),
-                                HealthBar,
-                            ),
-                        ));
-                    }
-                }),
-                ..Default::default()
-            },
-            Task {
-                label: "Kill them all!",
-                req: Box::new(move |g| terrorworms.living(g).count() == 0),
-                on_finish: Box::new(move |g| pen.gate_open(&mut g.ecs)),
-                ..Default::default()
-            },
-            Task {
-                label: "Exit the Pen",
-                req: Box::new(move |g| g.hero_dist(pen_pos) > pen_radius * 1.2),
-                guide: Box::new(npc2_guide),
-                on_finish: Box::new(move |g| {
-                    terrorworms.refill(g, pen);
-                    pen.gate_close(&mut g.ecs)
-                }),
-                ..Default::default()
-            },
-        ],
-        unlocks: vec![rpg_tropes_4],
-        ..Default::default()
-    });
-
-    ecs.spawn(npc(vec2(-4.0, 0.0)));
-    let scarecrow = ecs.spawn((
-        vec2(3.4, -2.4),
-        Phys::pushfoot_bighit(),
-        Health::full(5),
-        HealthBar,
-        Art::Scarecrow,
-    ));
-    let rpg_tropes_2 = quests.add(Quest {
-        title: "RPG Tropes II - Scarecrows",
-        completion_quip: "My wife and children -- who probably don't even exist -- thank you!",
-        unlock_description: concat!(
-            "I'm going to have to ask you to ruthlessly destroy a scarecrow I \n",
-            "painstakingly made from scratch over the course of several days \n",
-            "because this game takes place before modern manufacturing practices, \n",
-            "but it's fine because it's not like I have anything else to do other \n",
-            "than stand here pretending to work on another one!",
-        ),
-        tasks: vec![Task {
-            label: "Destroy Scarecrow",
-            req: Box::new(move |g| g.dead(scarecrow)),
-            guide: Box::new(move |g, gi| gi.push((Art::Sword, g.pos(scarecrow)))),
+    tasks.append(&mut vec![
+        Task {
+            label: "Talk to NPC 2",
+            req: Box::new(move |g| g.hero_dist_ent(npc2) < 1.3),
+            guide: Box::new(npc2_guide),
+            on_finish: Box::new(move |g| pen.gate_open(&mut g.ecs)),
             ..Default::default()
-        }],
-        unlocks: vec![rpg_tropes_3],
-        ..Default::default()
-    });
-
-    let sword = ecs.spawn((vec2(-2.5, -0.4), Art::Sword, Rot(FRAC_PI_2 + 0.1), ZOffset(0.42)));
+        },
+        Task {
+            label: "Enter the Pen",
+            req: Box::new(move |g| g.hero_dist(pen_pos) < pen_radius * 0.8),
+            guide: Box::new(move |_, gi| gi.push((Art::Arrow, pen_pos))),
+            on_finish: Box::new(move |g| {
+                for &tw in &terrorworms.0 {
+                    drop(g.innocent_for(tw, 1));
+                }
+                pen.gate_close(&mut g.ecs)
+            }),
+            ..Default::default()
+        },
+        Task {
+            label: "Slaughter the first one",
+            req: Box::new(move |g| terrorworms.dead(g).count() == 1),
+            guide: Box::new(move |g, gi| gi.extend(terrorworms.guides(g))),
+            on_finish: Box::new(move |g| {
+                for &tw in &terrorworms.0 {
+                    drop(g.innocent_for(tw, 10));
+                    if let Ok(Wander { goal, speed, .. }) = g.ecs.get_mut(tw).as_deref_mut() {
+                        *goal = rand_vec2() * pen_radius + pen_pos;
+                        *speed *= 2.5;
+                    }
+                }
+            }),
+            ..Default::default()
+        },
+        Task {
+            label: "Shit boutta get real",
+            req: Box::new(move |g| terrorworms.dead(g).count() == 2),
+            guide: Box::new(move |g, gi| gi.extend(terrorworms.guides(g))),
+            on_finish: Box::new(move |g| {
+                for &tw in &terrorworms.0 {
+                    drop(g.innocent_for(tw, 10));
+                    drop(g.ecs.remove_one::<Wander>(tw));
+                    drop(g.ecs.insert(
+                        tw,
+                        (
+                            Fighter {
+                                chase_speed: 0.0035,
+                                charge_speed: 0.0055,
+                                attack_interval: 140,
+                                aggroed: true,
+                                ..Default::default()
+                            },
+                            Bag::holding(Item::sword(tw)),
+                            Health::full(2),
+                            HealthBar,
+                        ),
+                    ));
+                }
+            }),
+            ..Default::default()
+        },
+        Task {
+            label: "Kill them all!",
+            req: Box::new(move |g| terrorworms.living(g).count() == 0),
+            on_finish: Box::new(move |g| pen.gate_open(&mut g.ecs)),
+            ..Default::default()
+        },
+        Task {
+            label: "Exit the Pen",
+            req: Box::new(move |g| g.hero_dist(pen_pos) > pen_radius * 1.2),
+            guide: Box::new(npc2_guide),
+            on_finish: Box::new(move |g| {
+                terrorworms.refill(g, pen);
+                pen.gate_close(&mut g.ecs)
+            }),
+            ..Default::default()
+        },
+    ]);
 
     quests.add(Quest {
-        title: "RPG Tropes Abound!",
+        title: "RPG Tropes I",
         completion_quip: "Try not to poke your eye out, like the last adventurer ...",
         unlock_description: concat!(
             "It's dangerous to go alone! \n",
-            "Allow me to give you, a complete stranger, a dangerous weapon \n",
+            "Allow me to give you, a complete stranger, dangerous weapons \n",
             "because I just happen to believe that you may be capable and willing \n",
             "to spare us from the horrible fate that will surely befall us regardless \n",
             "of whether or not you spend three hours immersed in a fishing minigame.",
         ),
-        unlocks: vec![rpg_tropes_2],
-        tasks: vec![Task {
-            label: "Navigate to the Sword",
-            req: Box::new(move |g| g.hero_dist(g.pos(sword) - vec2(0.8, 0.7)) < 1.3),
-            guide: Box::new(move |g, gi| gi.push((Art::Arrow, g.pos(sword) - vec2(0.8, 0.7)))),
-            on_finish: Box::new(move |g| {
-                or_err!(g.ecs.despawn(sword));
-                or_err!(g.give_item(hero, Item::sword(hero)))
-            }),
-            ..Default::default()
-        }],
         completion: QuestCompletion::Unlocked,
+        tasks,
         ..Default::default()
     });
 
@@ -1850,7 +1809,6 @@ pub fn open_tree<F: FnOnce(&mut megaui::Ui)>(
 
 struct Quests {
     quests: QuestVec,
-    auto_accept: bool,
     temp: Vec<usize>,
     tab_titles: [String; 3],
     new_tabs: [bool; 3],
@@ -1864,12 +1822,11 @@ impl Quests {
     fn new(ecs: &mut hecs::World) -> Self {
         Self {
             quests: QuestVec(Vec::with_capacity(100)),
-            auto_accept: false,
             temp: Vec::with_capacity(100),
             tab_titles: [(); 3].map(|_| String::with_capacity(25)),
             new_tabs: [true, false, false],
             jump_to_tab: None,
-            window_open: false,
+            window_open: true,
             guide_ents: Vec::with_capacity(100),
             guides: Vec::with_capacity(100),
             icon_ent: ecs.spawn((vec2(0.0, 0.0), Art::Compass, ZOffset(-999.0))),
@@ -1883,12 +1840,7 @@ impl Quests {
     }
 
     fn update(&mut self, g: &mut Game) {
-        let Self { auto_accept, quests, guides, jump_to_tab, temp, new_tabs, .. } = self;
-        if *auto_accept {
-            for (_, quest) in quests.unlocked_mut() {
-                quest.completion.accept(g.tick);
-            }
-        }
+        let Self { quests, guides, jump_to_tab, temp, new_tabs, .. } = self;
 
         guides.drain(..);
         for (_, _, quest) in quests.accepted_mut() {
@@ -1899,6 +1851,9 @@ impl Quests {
             } else {
                 quest.completion.finish(g.tick);
                 *jump_to_tab = Some(2);
+                if !self.window_open {
+                    new_tabs[2] = true;
+                }
                 temp.extend(quest.unlocks.iter().copied());
             }
         }
@@ -1964,11 +1919,6 @@ impl Quests {
 
     fn unlocked_ui(&mut self, ui: &mut megaui::Ui, tick: u32) {
         use megaui::widgets::Label;
-
-        if ui.button(None, ["Enable Auto-Accept", "Disable Auto-Accept"][self.auto_accept as usize])
-        {
-            self.auto_accept = !self.auto_accept;
-        }
 
         ui.separator();
         for (_, quest) in self.quests.unlocked_mut() {
