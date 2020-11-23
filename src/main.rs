@@ -7,7 +7,10 @@ use macroquad::prelude::*;
 mod math;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
-use megaui_macroquad::{megaui, mouse_over_ui};
+use megaui_macroquad::{
+    megaui::{self, hash},
+    mouse_over_ui,
+};
 
 macro_rules! or_err {
     ( $r:expr ) => {
@@ -81,14 +84,18 @@ impl Circle {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Phys([Option<Circle>; 5]);
+struct Phys([Option<Circle>; 6]);
 impl Phys {
-    fn new(circles: &[Circle]) -> Self {
-        let mut s = [None; 5];
-        for (i, c) in circles.iter().copied().enumerate() {
-            s[i] = Some(c);
+    fn new() -> Self {
+        Self([None; 6])
+    }
+
+    fn with(circles: &[Circle]) -> Self {
+        let mut s = Self::new();
+        for c in circles.iter().copied() {
+            s.insert(c);
         }
-        Self(s)
+        s
     }
 
     fn insert(&mut self, c: Circle) {
@@ -109,20 +116,22 @@ impl Phys {
         self.0.iter().filter_map(|s| s.as_ref())
     }
 
-    fn pushfoot_bighit() -> Self {
-        Self::new(&[Circle::push(0.3, vec2(0.0, 0.1)), Circle::hit(0.4, vec2(0.0, 0.4))])
+    fn pushfoot_bighit(mut self) -> Self {
+        self.insert(Circle::push(0.3, vec2(0.0, 0.1)));
+        self.insert(Circle::hit(0.4, vec2(0.0, 0.4)));
+        self
     }
 
-    fn pushfoot(r: f32) -> Self {
-        Self::new(&[Circle::push(r, vec2(0.0, r))])
+    fn pushfoot(mut self, r: f32) -> Self {
+        self.insert(Circle::push(r, vec2(0.0, r)));
+        self
     }
 
-    fn wings(r: f32, wr: f32, kind: CircleKind) -> Self {
-        Self::new(&[
-            Circle(r, vec2(0.0, r), kind),
-            Circle(wr, vec2(-r, r), kind),
-            Circle(wr, vec2(r, r), kind),
-        ])
+    fn wings(mut self, r: f32, wr: f32, kind: CircleKind) -> Self {
+        self.insert(Circle(r, vec2(0.0, r), kind));
+        self.insert(Circle(wr, vec2(-r, r), kind));
+        self.insert(Circle(wr, vec2(r, r), kind));
+        self
     }
 
     fn hurtbox(mut self, r: f32) -> Self {
@@ -280,17 +289,10 @@ impl Physics {
 
 #[derive(Debug, Clone)]
 enum BagWeapon {
-    Out { ent: hecs::Entity, art: Art, wants_in: bool },
-    In { item: Item, wants_out: bool },
+    Out { ent: hecs::Entity, item: WeaponItem, wants_in: bool },
+    In { item: WeaponItem, wants_out: bool },
 }
 impl BagWeapon {
-    fn art(&self) -> Art {
-        match self {
-            BagWeapon::Out { art, .. } => *art,
-            BagWeapon::In { item, .. } => item.art,
-        }
-    }
-
     fn out(&mut self) -> Option<hecs::Entity> {
         match self {
             &mut BagWeapon::Out { ent, .. } => Some(ent),
@@ -301,13 +303,24 @@ impl BagWeapon {
         }
     }
 
-    fn item(&mut self) -> Option<&Item> {
+    fn is_in(&self) -> bool {
         match self {
-            BagWeapon::Out { wants_in, .. } => {
-                *wants_in = true;
-                None
-            }
-            BagWeapon::In { item, .. } => Some(&*item),
+            BagWeapon::Out { .. } => false,
+            BagWeapon::In { .. } => true,
+        }
+    }
+
+    fn get_in(&mut self) {
+        match self {
+            BagWeapon::Out { wants_in, .. } => *wants_in = true,
+            BagWeapon::In { .. } => {}
+        }
+    }
+
+    fn item(&self) -> &WeaponItem {
+        match self {
+            BagWeapon::Out { item, .. } => &item,
+            BagWeapon::In { item, .. } => &item,
         }
     }
 
@@ -332,7 +345,7 @@ impl BagWeapon {
         }
     }
 
-    fn take_item(self) -> Option<Item> {
+    fn take_item(self) -> Option<WeaponItem> {
         match self {
             BagWeapon::Out { .. } => None,
             BagWeapon::In { item, .. } => Some(item),
@@ -340,11 +353,13 @@ impl BagWeapon {
     }
 }
 
+const BAG_SLOTS: usize = 12;
+const BAG_TRINKETS: usize = 4;
 #[derive(Debug, Default, Clone)]
 struct Bag {
     weapon: Option<BagWeapon>,
-    slots: [Option<Item>; 24],
-    trinkets: [Option<Item>; 4],
+    slots: [Option<Item>; BAG_SLOTS],
+    trinkets: [Option<Trinket>; BAG_TRINKETS],
 }
 impl Bag {
     fn holding(item: Item) -> Self {
@@ -354,42 +369,68 @@ impl Bag {
     }
 
     fn take(&mut self, item: Item) {
-        if self.weapon.is_none() {
-            self.weapon = Some(BagWeapon::In { item, wants_out: false });
-        } else {
-            let empty_slot = self.slots.iter_mut().find(|s| s.is_none());
-            if let Some(slot) = empty_slot {
-                *slot = Some(item);
-            } else {
-                dbg!("lmao ignoring item");
+        match item {
+            Item::Weapon(wep) if self.weapon.is_none() => {
+                self.weapon = Some(BagWeapon::In { item: wep, wants_out: false });
+                return;
             }
+            _ => {}
         }
+
+        let empty_slot = self.slots.iter_mut().find(|s| s.is_none());
+        if let Some(slot) = empty_slot {
+            *slot = Some(item);
+        } else {
+            dbg!("lmao ignoring item");
+        }
+    }
+
+    fn mods(&self) -> HeroMod {
+        self.trinkets.iter().filter_map(|t| *t).fold(HeroMod::default(), |a, t| a + t.mods())
     }
 }
 
 #[derive(Debug)]
-enum SlotAction {
-    ReplaceWith(Item),
-    MoveTo(u64),
-    Stay,
+struct ItemMove {
+    from: SlotHandle,
+    to: SlotHandle,
+}
+
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
+enum SlotHandle {
+    Weapon,
+    Trinket(usize),
+    Loose(usize),
 }
 
 struct BagUi {
-    moves: Vec<(u64, Item)>,
-    moving_weapon: Option<u64>,
-    icon_ent: hecs::Entity,
-    icon_jumping: bool,
+    moves: Vec<ItemMove>,
+    stomach: Vec<Consumable>,
+
+    handle_bank: fxhash::FxHashMap<u64, SlotHandle>,
+
+    selected: Option<SlotHandle>,
+
     window_open: bool,
     dragging: bool,
+
+    icon_ent: hecs::Entity,
+    icon_jumping: bool,
 }
 impl BagUi {
     fn new(ecs: &mut hecs::World) -> Self {
         Self {
             moves: Vec::with_capacity(100),
+            stomach: Vec::with_capacity(100),
+            handle_bank: std::iter::once(SlotHandle::Weapon)
+                .chain((0..BAG_SLOTS).map(|i| SlotHandle::Loose(i)))
+                .chain((0..BAG_TRINKETS).map(|i| SlotHandle::Trinket(i)))
+                .map(|i| (hash!(i), i))
+                .collect(),
             icon_ent: ecs.spawn((vec2(0.0, 0.0), Art::Lockbox, ZOffset(-999.0))),
             icon_jumping: false,
             window_open: false,
-            moving_weapon: None,
+            selected: None,
             dragging: false,
         }
     }
@@ -413,44 +454,45 @@ impl BagUi {
         vec2(510.0, 250.0)
     }
 
-    fn slot(&mut self, ui: &mut megaui::Ui, id: u64, art: Option<Art>, p: Vec2) -> SlotAction {
+    fn slot(&mut self, ui: &mut megaui::Ui, s: SlotHandle, art: Option<Art>, p: Vec2) {
         use megaui::{widgets::Group, Drag, Vector2};
 
+        let id = hash!(s);
         let (x, y) = p.into();
         let drag = Group::new(id, Vector2::new(50., 50.))
             .position(Vector2::new(x, y))
             .draggable(art.is_some())
-            .hoverable(self.dragging)
-            .highlight(self.dragging)
+            .hoverable(self.dragging && Some(s) != self.selected)
+            .highlight(Some(s) == self.selected)
             .ui(ui, |ui| {
-                ui.label(
-                    Vector2::new(5., 10.),
-                    &art.as_ref().map(|a| format!("{:#?}", a)).unwrap_or_else(|| "".to_string()),
-                );
+                ui.label(Vector2::new(5., 10.), art.as_ref().map(|a| a.name()).unwrap_or(""));
             });
 
-        if let Some((_, item)) = self.moves.drain_filter(|(m_id, _)| *m_id == id).next() {
-            return SlotAction::ReplaceWith(item);
+        if ui.last_item_clicked() && art.is_some() {
+            self.selected = Some(s);
         }
 
         match drag {
             Drag::Dropped(_, id) => {
                 self.dragging = false;
-                if let Some(id) = id {
-                    return SlotAction::MoveTo(id);
+                if let Some(&to) = id.and_then(|id| self.handle_bank.get(&id)) {
+                    self.moves.push(ItemMove { from: s, to });
                 }
             }
-            Drag::Dragging(_, _) => self.dragging = true,
+            Drag::Dragging(_, _) => {
+                self.dragging = true;
+            }
             Drag::No => {}
         }
-
-        SlotAction::Stay
     }
 
     fn ui(&mut self, bag: &mut Bag) {
         use megaui_macroquad::{
             draw_window,
-            megaui::{hash, widgets::Group, Vector2},
+            megaui::{
+                widgets::{Group, Label},
+                Vector2,
+            },
             WindowParams,
         };
 
@@ -458,13 +500,57 @@ impl BagUi {
             return;
         }
 
-        if self.moving_weapon.is_some() && bag.weapon.as_mut().and_then(|w| w.item()).is_some() {
-            if let (Some(id), Some(item)) =
-                (self.moving_weapon.take(), bag.weapon.take().and_then(|w| w.take_item()))
-            {
-                self.moves.push((id, item));
+        self.moves.drain_filter(|&mut ItemMove { from, to }| match [from, to] {
+            [SlotHandle::Loose(i0), SlotHandle::Loose(i1)] => {
+                let temp = bag.slots[i0].take();
+                bag.slots[i0] = bag.slots[i1].take();
+                bag.slots[i1] = temp;
+                true
             }
-        }
+            [SlotHandle::Trinket(i0), SlotHandle::Trinket(i1)] => {
+                let temp = bag.trinkets[i0].take();
+                bag.trinkets[i0] = bag.trinkets[i1].take();
+                bag.trinkets[i1] = temp;
+                true
+            }
+            [SlotHandle::Trinket(t), SlotHandle::Loose(l)]
+            | [SlotHandle::Loose(l), SlotHandle::Trinket(t)] => {
+                if let Some(Item::Trinket(loose_trinket)) = bag.slots[l] {
+                    bag.slots[l] = bag.trinkets[t].map(|t| Item::Trinket(t));
+                    bag.trinkets[t] = Some(loose_trinket);
+                } else if bag.slots[l].is_none() {
+                    bag.slots[l] = bag.trinkets[t].map(|t| Item::Trinket(t));
+                    bag.trinkets[t] = None;
+                }
+                true
+            }
+            [SlotHandle::Weapon, SlotHandle::Loose(l)]
+            | [SlotHandle::Loose(l), SlotHandle::Weapon] => {
+                if !matches!(bag.slots[l], None | Some(Item::Weapon(_))) {
+                    return true;
+                }
+
+                if let Some(wep) = bag.weapon.as_mut() {
+                    if !wep.is_in() {
+                        wep.get_in();
+                        return false;
+                    }
+
+                    if let Some(old_wep) = bag.weapon.take().and_then(|w| w.take_item()) {
+                        let new_wep = bag.slots[l].take();
+                        bag.slots[l] = Some(Item::Weapon(old_wep));
+                        if let Some(wep) = new_wep {
+                            bag.take(wep);
+                        }
+                    }
+                } else if let Some(wep) = bag.slots[l].take() {
+                    bag.take(wep);
+                }
+
+                true
+            }
+            _ => true,
+        });
 
         let size = Self::size();
         self.window_open = draw_window(
@@ -473,64 +559,99 @@ impl BagUi {
             size,
             WindowParams { label: "Items - toggle with E".to_string(), ..Default::default() },
             |ui| {
-                Group::new(hash!("equipped box"), Vector2::new(size.x() * 0.3, size.y() - 25.0))
-                    .position(Vector2::new(5.0, 5.0))
-                    .ui(ui, |ui| {
-                        ui.label(Vector2::new(80.0, 35.0), "<- Weapon");
-                        match self.slot(
-                            ui,
-                            hash!("weapon slot"),
-                            bag.weapon.as_ref().map(|w| w.art()),
-                            vec2(20.0, 20.0),
-                        ) {
-                            SlotAction::ReplaceWith(item) => {
-                                bag.weapon = None;
-                                bag.take(item);
-                            }
-                            SlotAction::MoveTo(id) => self.moving_weapon = Some(id),
-                            SlotAction::Stay => {}
-                        }
+                let pane = Vector2::new(size.x() * 0.3, size.y() - 25.0);
+                Group::new(hash!(), pane).position(Vector2::new(5.0, 5.0)).ui(ui, |ui| {
+                    ui.label(Vector2::new(80.0, 35.0), "<- Weapon");
+                    self.slot(
+                        ui,
+                        SlotHandle::Weapon,
+                        bag.weapon.as_ref().map(|w| w.item().art),
+                        vec2(20.0, 20.0),
+                    );
 
-                        ui.label(Vector2::new(40.0, 85.0), "Trinkets");
-                        for (i, item) in bag.trinkets.iter_mut().enumerate() {
-                            match self.slot(
-                                ui,
-                                hash!("trinket slot", i),
-                                item.as_ref().map(|s| s.art),
-                                vec2(
-                                    (i % 2) as f32 * 55.0 + 20.0,
-                                    (i as f32 / 2.0).floor() * 55.0 + 105.0,
-                                ),
-                            ) {
-                                SlotAction::ReplaceWith(i) => *item = Some(i),
-                                SlotAction::MoveTo(id) => {
-                                    if let Some(item) = item.take() {
-                                        self.moves.push((id, item));
+                    ui.label(Vector2::new(40.0, 85.0), "Trinkets");
+                    for (i, trinket) in bag.trinkets.iter_mut().enumerate() {
+                        self.slot(
+                            ui,
+                            SlotHandle::Trinket(i),
+                            trinket.map(|t| Art::Trinket(t)),
+                            vec2(
+                                (i % 2) as f32 * 55.0 + 20.0,
+                                (i as f32 / 2.0).floor() * 55.0 + 105.0,
+                            ),
+                        );
+                    }
+                });
+
+                for (i, item) in bag.slots.iter_mut().enumerate() {
+                    self.slot(
+                        ui,
+                        SlotHandle::Loose(i),
+                        item.as_ref().map(|s| s.art()),
+                        vec2(
+                            (i % 3) as f32 * 55.0 + size.x() * 0.3 + 20.0,
+                            (i as f32 / 3.0).floor() * 55.0 + 10.0,
+                        ),
+                    );
+                }
+
+                let trinket_space = bag
+                    .trinkets
+                    .iter()
+                    .enumerate()
+                    .find(|(_, t)| t.is_none())
+                    .map(|(i, _)| SlotHandle::Trinket(i));
+
+                let info = match self.selected {
+                    Some(SlotHandle::Loose(i)) => {
+                        bag.slots[i].as_ref().map(|b| (b.art(), b.description()))
+                    }
+                    Some(SlotHandle::Trinket(i)) => {
+                        bag.trinkets[i].map(|t| (Art::Trinket(t), t.description()))
+                    }
+                    Some(SlotHandle::Weapon) => {
+                        bag.weapon.as_ref().map(|b| (b.item().art, b.item().description()))
+                    }
+                    _ => None,
+                };
+
+                if let Some((art, desc)) = info {
+                    let name = art.name();
+
+                    Group::new(hash!(), pane).position(Vector2::new(345.0, 5.0)).ui(ui, |ui| {
+                        Group::new(hash!(), Vector2::new(100.0, 100.0))
+                            .position(Vector2::new((pane.x - 100.0) / 2.0, 10.0))
+                            .ui(ui, |ui| ui.label(None, name));
+
+                        ui.label(Vector2::new(5.0, 115.0), name);
+                        Label::new(desc).position(Vector2::new(5.0, 135.0)).multiline(14.0).ui(ui);
+
+                        let bottom = Vector2::new(5.0, 202.0);
+                        if let Some(SlotHandle::Loose(i)) = self.selected {
+                            match bag.slots[i].as_ref() {
+                                Some(&Item::Trinket(_)) => {
+                                    if let Some(space) = trinket_space {
+                                        if ui.button(bottom, "Equip") {
+                                            self.moves.push(ItemMove {
+                                                from: SlotHandle::Loose(i),
+                                                to: space,
+                                            });
+                                            self.selected = Some(space);
+                                        }
+                                    } else {
+                                        ui.label(bottom, "Clear space to equip");
                                     }
                                 }
-                                SlotAction::Stay => {}
+                                Some(&Item::Consumable(consumable)) => {
+                                    if ui.button(bottom, "Consume") {
+                                        bag.slots[i].take();
+                                        self.stomach.push(consumable);
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     });
-
-                for (i, item) in bag.slots.iter_mut().enumerate() {
-                    match self.slot(
-                        ui,
-                        hash!("bag slot", i),
-                        item.as_ref().map(|s| s.art),
-                        vec2(
-                            (i % 6) as f32 * 55.0 + size.x() * 0.3 + 20.0,
-                            (i as f32 / 6.0).floor() * 55.0 + 10.0,
-                        ),
-                    ) {
-                        SlotAction::ReplaceWith(i) => *item = Some(i),
-                        SlotAction::MoveTo(id) => {
-                            if let Some(item) = item.take() {
-                                self.moves.push((id, item));
-                            }
-                        }
-                        SlotAction::Stay => {}
-                    }
                 }
             },
         );
@@ -543,7 +664,7 @@ struct WantsIn {
 }
 
 struct KeeperOfBags {
-    wants_out: Vec<(hecs::Entity, Item)>,
+    wants_out: Vec<(hecs::Entity, WeaponItem)>,
     wants_in: Vec<WantsIn>,
     ownerless: Vec<hecs::Entity>,
 }
@@ -565,7 +686,7 @@ impl KeeperOfBags {
                 .filter_map(|(_, b)| {
                     let item = b.weapon.take()?.take_item()?;
                     let ent = ecs.reserve_entity();
-                    b.weapon = Some(BagWeapon::Out { ent, art: item.art, wants_in: false });
+                    b.weapon = Some(BagWeapon::Out { ent, item: item.clone(), wants_in: false });
                     Some((ent, item))
                 }),
         );
@@ -697,6 +818,14 @@ impl Weapon<'_> {
         self.wep.last_rot = *self.rot;
         for Circle(_, o, _) in self.phy.iter_mut() {
             *o = self.rot.apply(*o);
+        }
+    }
+
+    fn swinging(&self) -> bool {
+        if let Attack::Swing(_) = self.wep.attack {
+            true
+        } else {
+            false
         }
     }
 
@@ -872,9 +1001,10 @@ struct Hero<'a> {
     art: &'a Art,
     dir: &'a mut Direction,
     bag: &'a mut Bag,
+    hp: &'a mut Health,
 }
 impl Hero<'_> {
-    fn movement(&mut self) {
+    fn movement(&mut self, multiplier: f32) {
         #[rustfmt::skip]
         let keymap = [
             (KeyCode::W,  Vec2::unit_y()),
@@ -891,6 +1021,7 @@ impl Hero<'_> {
 
         if move_vec.length_squared() > 0.0 {
             self.vel.0 += move_vec
+                * multiplier
                 * if self.bag.weapon.is_none()
                     || move_vec.x() == 0.0
                     || move_vec.x().signum() == self.dir.signum()
@@ -909,13 +1040,21 @@ impl Hero<'_> {
             }
         }
     }
+
+    fn consume(&mut self, consumable: Consumable) {
+        match consumable {
+            Consumable::HealthPotion => self.hp.0 = (self.hp.0 + 8).min(self.hp.1),
+        }
+    }
 }
 
 const GOLDEN_RATIO: f32 = 1.618034;
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 enum Art {
     Hero,
+    Consumable(Consumable),
+    Trinket(Trinket),
     Compass,
     Scarecrow,
     Arrow,
@@ -936,20 +1075,35 @@ impl Art {
         }
     }
 
+    fn name(self) -> &'static str {
+        match self {
+            Art::Hero => "Hero",
+            Art::Consumable(c) => c.name(),
+            Art::Trinket(t) => t.name(),
+            Art::Scarecrow => "Scarecrow",
+            Art::Arrow => "Arrow",
+            Art::Chest => "Chest",
+            Art::Lockbox => "Lockbox",
+            Art::Compass => "Compass",
+            Art::TripletuftedTerrorworm => "Tripletufted Terrorworm",
+            Art::VioletVagabond => "Violet Vagabond",
+            Art::Tree => "Tree",
+            Art::Npc => "Npc",
+            Art::Sword => "Sword",
+            Art::Post => "Post",
+        }
+    }
+
     fn bounding(self) -> f32 {
         match self {
+            Art::Arrow | Art::Chest | Art::Npc | Art::Sword => GOLDEN_RATIO / 2.0,
             Art::Hero => 0.5,
-            Art::Scarecrow => 0.4,
-            Art::Arrow => GOLDEN_RATIO / 2.0,
-            Art::Chest => GOLDEN_RATIO / 2.0,
             Art::Lockbox => 0.5,
             Art::Compass => 0.5,
-            Art::TripletuftedTerrorworm => 0.4,
-            Art::VioletVagabond => 0.4,
+            Art::TripletuftedTerrorworm | Art::VioletVagabond | Art::Scarecrow => 0.4,
             Art::Tree => 2.0,
-            Art::Npc => GOLDEN_RATIO / 2.0,
-            Art::Sword => GOLDEN_RATIO / 2.0,
             Art::Post => 1.0,
+            Art::Trinket(_) | Art::Consumable(_) => 0.0,
         }
     }
 }
@@ -976,6 +1130,7 @@ impl Health {
     fn full(hp: u32) -> Self {
         Self(hp, hp)
     }
+
     fn ratio(self) -> f32 {
         self.0 as f32 / self.1 as f32
     }
@@ -984,22 +1139,130 @@ impl Health {
 #[derive(Copy, Clone, Debug)]
 struct HealthBar;
 
-#[derive(hecs::Bundle, Clone, Debug)]
-struct Item {
-    pos: Vec2,
-    art: Art,
-    rot: Rot,
-    phys: Phys,
-    wep: WeaponState,
-    contacts: Contacts,
+macro_rules! trinkets {
+    ( $($name:ident : {
+        name: $display_name:literal,
+        mods: $mods:expr,
+        desc: $desc:expr,
+    })* ) => {
+        #[derive(Copy, Clone, Debug, PartialEq)]
+        enum Trinket { $( $name )* }
+        impl Trinket {
+            fn mods(self) -> HeroMod {
+                match self {
+                    $( Trinket::$name => $mods )*
+                }
+            }
+
+            fn name(self) -> &'static str {
+                match self {
+                    $( Trinket::$name => $display_name )*
+                }
+            }
+
+            fn description(self) -> &'static str {
+                match self {
+                    $( Trinket::$name => $desc )*
+                }
+            }
+        }
+    }
+}
+
+trinkets! {
+    StoneRing: {
+        name: "Stone Ring",
+        mods: HeroMod { swinging_movement: -0.15, crit_chance: 0.05, ..HeroMod::empty() },
+        desc: concat!(
+            "Move 15% slower \n",
+            "while swinging, \n",
+            "Land critical hits \n",
+            "5% more often. \n",
+        ),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct HeroMod {
+    swinging_movement: f32,
+    crit_chance: f32,
+}
+impl HeroMod {
+    fn empty() -> Self {
+        Self { swinging_movement: 0.0, crit_chance: 0.00 }
+    }
+}
+impl std::ops::Add<HeroMod> for HeroMod {
+    type Output = Self;
+
+    fn add(self, othr: HeroMod) -> Self::Output {
+        Self {
+            swinging_movement: self.swinging_movement + othr.swinging_movement,
+            crit_chance: self.crit_chance + othr.crit_chance,
+        }
+    }
+}
+
+impl Default for HeroMod {
+    fn default() -> Self {
+        HeroMod { swinging_movement: 1.0, crit_chance: 0.01, ..Self::empty() }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum Consumable {
+    HealthPotion,
+}
+impl Consumable {
+    fn name(self) -> &'static str {
+        match self {
+            Consumable::HealthPotion => "Health Potion",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Consumable::HealthPotion => concat!(
+                "Theoretically \n",
+                "restores 8 \n",
+                "hitpoints. Not \n",
+                "clinically tested. \n",
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Item {
+    Weapon(WeaponItem),
+    Trinket(Trinket),
+    Consumable(Consumable),
 }
 impl Item {
+    fn art(&self) -> Art {
+        match self {
+            &Item::Trinket(t) => Art::Trinket(t),
+            &Item::Consumable(t) => Art::Consumable(t),
+            &Item::Weapon(WeaponItem { art, .. }) => art,
+        }
+    }
+
+    fn description(&self) -> &'static str {
+        match self {
+            Item::Trinket(t) => t.description(),
+            Item::Consumable(c) => c.description(),
+            Item::Weapon(w) => w.description(),
+        }
+    }
+}
+
+impl Item {
     fn sword(owner: hecs::Entity) -> Self {
-        Self {
+        Item::Weapon(WeaponItem {
             pos: Vec2::zero(),
             art: Art::Sword,
             rot: Rot(0.0),
-            phys: Phys::new(&[
+            phys: Phys::with(&[
                 Circle::hurt(0.2, vec2(0.0, 1.35)),
                 Circle::hurt(0.185, vec2(0.0, 1.1)),
                 Circle::hurt(0.15, vec2(0.0, 0.85)),
@@ -1007,7 +1270,27 @@ impl Item {
             ]),
             wep: WeaponState::new(owner),
             contacts: Contacts::default(),
-        }
+        })
+    }
+}
+
+#[derive(hecs::Bundle, Clone, Debug)]
+struct WeaponItem {
+    pos: Vec2,
+    art: Art,
+    rot: Rot,
+    phys: Phys,
+    wep: WeaponState,
+    contacts: Contacts,
+}
+impl WeaponItem {
+    fn description(&self) -> &'static str {
+        concat!(
+            "A dangerous weapon. \n",
+            "Try not to poke \n",
+            "your eyes out, like \n",
+            "the last adventurer. \n",
+        )
     }
 }
 
@@ -1050,20 +1333,39 @@ fn circle_points(n: usize) -> impl Iterator<Item = Vec2> {
     (0..n).map(move |i| Rot((i as f32 / n as f32) * TAU).vec2())
 }
 
-fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
+fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests, bag_ui: &mut BagUi) {
     let &Game { tick, mouse_pos, .. } = &*game;
+    let Game { ecs, hero_swinging, .. } = game;
 
-    let (hero_pos, hero_wep, hero_vel, hero_dir) = match game.ecs.query_one_mut::<Hero>(hero) {
+    let (hero_pos, hero_vel, hero_dir, hero_wep, hero_mods) = match ecs.query_one_mut::<Hero>(hero)
+    {
         Ok(mut hero) => {
-            hero.movement();
-            (*hero.pos, hero.bag.weapon.as_mut().and_then(|w| w.out()), hero.vel.0, *hero.dir)
+            let mods = hero.bag.mods();
+
+            hero.movement(if *hero_swinging {
+                mods.swinging_movement
+            } else {
+                1.0
+            });
+
+            for consumable in bag_ui.stomach.drain(..) {
+                hero.consume(consumable);
+            }
+
+            (
+                *hero.pos,
+                hero.vel.0,
+                *hero.dir,
+                hero.bag.weapon.as_mut().and_then(|w| w.out()),
+                mods,
+            )
         }
         Err(_) => return,
     };
     game.hero_pos = hero_pos;
 
     let hero_attacks = hero_wep
-        .and_then(|e| game.ecs.query_one_mut::<Weapon>(e).ok())
+        .and_then(|e| ecs.query_one_mut::<Weapon>(e).ok())
         .map(|mut wep| {
             wep.tick(WeaponInput {
                 start_attacking: Some(AttackKind::Swipe)
@@ -1074,13 +1376,19 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests) {
                 wielder_dir: hero_dir,
                 tick,
             });
+            *hero_swinging = wep.swinging();
             wep.attack_hits()
         })
         .unwrap_or_default();
 
     let knockback = hero_attacks.iter().fold(Vec2::zero(), |acc, &hit| {
-        let (dead, vel) =
-            game.hit(HitInput { hitter_pos: hero_pos, hit, damage: 1, knockback: 0.2 });
+        let (dead, vel) = game.hit(HitInput {
+            hitter_pos: hero_pos,
+            hit,
+            damage: 1,
+            knockback: 0.2,
+            crit_chance: hero_mods.crit_chance,
+        });
         if dead {
             quests.update(game);
         }
@@ -1245,8 +1553,13 @@ impl Waffle {
                         AttackKind::Stab => (3, 0.085, 0.28),
                     };
                     let delta = attacks.iter().fold(Vec2::zero(), |acc, &hit| {
-                        let (_, vel) =
-                            game.hit(HitInput { hitter_pos: pos, hit, damage, knockback });
+                        let (_, vel) = game.hit(HitInput {
+                            hitter_pos: pos,
+                            hit,
+                            damage,
+                            knockback,
+                            crit_chance: 0.0,
+                        });
                         acc + vel
                     });
                     if let Ok(mut v) = game.ecs.get_mut::<Velocity>(e) {
@@ -1259,6 +1572,168 @@ impl Waffle {
     }
 }
 
+fn paragraph(ui: &mut megaui::Ui, para: &'static str) {
+    use megaui::widgets::Label;
+    Label::new(para).multiline(14.0).ui(ui);
+}
+
+#[derive(Copy, Clone)]
+struct RewardChoice {
+    id: u64,
+    choices: &'static [(Item, usize, &'static str, Option<&'static str>)],
+    selected: Option<Art>,
+    rewarded: bool,
+}
+impl RewardChoice {
+    fn new(id: u64, choices: &'static [(Item, usize, &'static str, Option<&'static str>)]) -> Self {
+        Self { id, choices, selected: None, rewarded: false }
+    }
+
+    fn ui(&mut self, ui: &mut megaui::Ui) -> smallvec::SmallVec<[Item; 5]> {
+        use megaui::{
+            widgets::{Group, Label},
+            Vector2,
+        };
+        let &mut Self { id, ref mut selected, choices, ref mut rewarded } = self;
+        let mut selected_text = None;
+        let mut accepted = false;
+
+        paragraph(ui, "\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
+
+        ui.group(hash!(id, "choicebox"), Vector2::new(255.0, 200.0), |ui| {
+            for (i, &(ref item, _, text, longtext)) in choices.iter().enumerate() {
+                let art = item.art();
+
+                Group::new(hash!(id, "choice", text), Vector2::new(60.0, 80.0))
+                    .position(Vector2::new(47.0 + i as f32 / choices.len() as f32 * 200.0, 10.0))
+                    .highlight(*selected == Some(art))
+                    .ui(ui, |ui| {
+                        Group::new(hash!(id, "choiceinner", text), Vector2::new(50.0, 50.0))
+                            .position(Vector2::new(5.0, 5.0))
+                            .ui(ui, |ui| ui.label(None, art.name()));
+
+                        if !*rewarded && ui.button(Vector2::new(12.0, 58.0), "Take") {
+                            *selected = Some(art);
+                        }
+                    });
+
+                if *selected == Some(art) {
+                    selected_text = Some((text, longtext.unwrap_or(item.description())));
+                }
+            }
+
+            if let Some((t, longt)) = selected_text {
+                ui.label(Vector2::new(5.0, 100.0), t);
+
+                Label::new(longt).position(Vector2::new(5.0, 120.0)).multiline(14.0).ui(ui);
+
+                if !*rewarded {
+                    accepted = ui.button(Vector2::new(5.0, 177.0), &format!("Confirm {}", t));
+                } else {
+                    ui.label(Vector2::new(5.0, 177.0), &format!("{} Accepted", t));
+                }
+            }
+        });
+
+        selected
+            .filter(|_| {
+                if accepted && !*rewarded {
+                    *rewarded = true;
+                    true
+                } else {
+                    false
+                }
+            })
+            .and_then(|art| {
+                self.choices
+                    .iter()
+                    .find(|(i, ..)| i.art() == art)
+                    .map(|(i, c, ..)| (0..*c).map(|_| i.clone()).collect())
+            })
+            .unwrap_or_default()
+    }
+}
+
+struct Npc {
+    name: &'static str,
+    talks: Vec<Box<dyn FnMut(&mut megaui::Ui, &mut Game) + Send + Sync>>,
+    within_range: bool,
+}
+impl Npc {
+    fn new(name: &'static str) -> Self {
+        Self { name, talks: vec![], within_range: false }
+    }
+
+    fn with_paragraph(mut self, para: &'static str) -> Self {
+        self.ui(move |ui, _| paragraph(ui, para));
+        self
+    }
+
+    fn ui(&mut self, f: impl FnMut(&mut megaui::Ui, &mut Game) + Send + Sync + 'static) {
+        self.talks.push(Box::new(f));
+    }
+}
+
+struct NpcUi {
+    talks: std::collections::HashMap<
+        &'static str,
+        (bool, Vec<Box<dyn FnMut(&mut megaui::Ui, &mut Game) + Send + Sync>>),
+    >,
+}
+
+impl NpcUi {
+    fn new() -> Self {
+        Self { talks: std::collections::HashMap::with_capacity(100) }
+    }
+
+    fn ui(&mut self, game: &mut Game) {
+        use megaui_macroquad::{draw_window, WindowParams};
+        let ecs = &mut game.ecs;
+        let hero_pos = game.hero_pos;
+
+        for (_, (npc, &pos)) in &mut ecs.query::<(&mut Npc, &Vec2)>() {
+            let (active, talks) =
+                self.talks.entry(npc.name).or_insert((false, Vec::with_capacity(10)));
+
+            let within_range = (pos - hero_pos).length() < 1.3;
+            if within_range != npc.within_range {
+                *active = within_range;
+            }
+            npc.within_range = within_range;
+
+            talks.append(&mut npc.talks);
+        }
+        let i = self.talks.values().filter(|(a, _)| *a).count();
+
+        for (name, (active, talks)) in self.talks.iter_mut().filter(|(_, (a, _))| *a) {
+            let size = vec2(282.0, 280.0);
+            *active = draw_window(
+                hash!(name),
+                vec2(screen_width(), screen_height()) / 2.0 - size * (0.4 + 0.05 * i as f32),
+                size,
+                WindowParams { label: name.to_string(), close_button: true, ..Default::default() },
+                |ui| {
+                    if let Some(top) = talks.last_mut() {
+                        open_tree(ui, hash!(name, "cur"), "Greetings!", |ui| (top)(ui, game));
+                        ui.separator();
+                    }
+
+                    if talks.len() < 2 {
+                        return;
+                    }
+
+                    ui.tree_node(hash!(name, "old"), "Older Monologues", |ui| {
+                        for talk in talks.iter_mut().rev().skip(1) {
+                            (talk)(ui, game);
+                            ui.separator();
+                        }
+                    });
+                },
+            );
+        }
+    }
+}
+
 #[macroquad::main("rpg")]
 async fn main() {
     let mut ecs = hecs::World::new();
@@ -1266,16 +1741,18 @@ async fn main() {
     let mut waffle = Waffle::new();
     let mut physics = Physics::new();
     let mut bag_ui = BagUi::new(&mut ecs);
+    let mut npc_ui = NpcUi::new();
     let mut quests = Quests::new(&mut ecs);
     let mut keeper_of_bags = KeeperOfBags::new();
     let mut fps = Fps::new();
 
-    let npc = |npc_pos| (npc_pos, Phys::wings(0.3, 0.21, CircleKind::Push), Art::Npc);
+    let npc =
+        |npc_pos, npc| (npc_pos, npc, Phys::new().wings(0.3, 0.21, CircleKind::Push), Art::Npc);
 
     let hero = ecs.spawn((
         vec2(-0.4, -3.4),
         Velocity::default(),
-        Phys::wings(0.3, 0.21, CircleKind::Push).hurtbox(0.5),
+        Phys::new().wings(0.3, 0.21, CircleKind::Push).hurtbox(0.5),
         Art::Hero,
         Direction::Left,
         Health::full(10),
@@ -1284,7 +1761,7 @@ async fn main() {
     ecs.spawn((
         vec2(0.0, 0.0),
         Art::Chest,
-        Phys::pushfoot_bighit(),
+        Phys::new().wings(0.4, 0.4, CircleKind::Push).wings(0.4, 0.4, CircleKind::Hit),
         Velocity::default(),
         Health::full(5),
     ));
@@ -1300,6 +1777,7 @@ async fn main() {
         fn new(ecs: &mut hecs::World, radius: f32, pos: Vec2, gate: usize) -> Self {
             let mut pen =
                 Self { gate: unsafe { [std::mem::zeroed(), std::mem::zeroed()] }, radius, pos };
+
             for (i, post_pos) in circle_points((PI * radius / 0.4).ceil() as usize).enumerate() {
                 let post = pen.post(post_pos);
                 let e = ecs.spawn(post.clone());
@@ -1314,7 +1792,7 @@ async fn main() {
         }
 
         fn post(&self, post_pos: Vec2) -> Post {
-            (post_pos * self.radius + self.pos, Art::Post, Phys::pushfoot(0.4))
+            (post_pos * self.radius + self.pos, Art::Post, Phys::new().pushfoot(0.4))
         }
 
         fn gate_open(&self, ecs: &mut hecs::World) {
@@ -1331,7 +1809,7 @@ async fn main() {
     }
 
     fn tree(ecs: &mut hecs::World, p: Vec2) {
-        ecs.spawn((p, Art::Tree, Phys::pushfoot(0.4)));
+        ecs.spawn((p, Art::Tree, Phys::new().pushfoot(0.4)));
     }
     for p in circle_points(5) {
         tree(&mut ecs, p * 6.0 + vec2(-21.5, -20.0));
@@ -1361,7 +1839,7 @@ async fn main() {
                 attack_interval: 75,
                 ..Default::default()
             },
-            Phys::pushfoot_bighit(),
+            Phys::new().pushfoot_bighit(),
             Velocity::default(),
             Bag::holding(Item::sword(vv)),
         )
@@ -1374,33 +1852,124 @@ async fn main() {
 
     let sword = ecs.spawn((vec2(-2.5, -0.4), Art::Sword, Rot(FRAC_PI_2 + 0.1), ZOffset(0.42)));
 
+    let npc1 = ecs.spawn(npc(
+        vec2(-4.0, 0.0),
+        Npc::new("NPC 1").with_paragraph(concat!(
+            "It's dangerous to go alone! \n",
+            "Allow me to give you, a complete \n",
+            "stranger, a dangerous weapon \n",
+            "because I just happen to believe \n",
+            "that you may be capable and willing \n",
+            "to spare us from the horrible fate \n",
+            "that will surely befall us regardless \n",
+            "of whether or not you spend three hours \n",
+            "immersed in a fishing minigame.",
+        )),
+    ));
+
     tasks.push(Task {
         label: "Navigate to the Sword",
         req: Box::new(move |g| g.hero_dist(g.pos(sword) - vec2(0.8, 0.7)) < 1.3),
         guide: Box::new(move |g, gi| gi.push((Art::Arrow, g.pos(sword) - vec2(0.8, 0.7)))),
         on_finish: Box::new(move |g| {
             or_err!(g.ecs.despawn(sword));
-            or_err!(g.give_item(hero, Item::sword(hero)))
+            or_err!(g.give_item(hero, Item::sword(hero)));
+            if let Ok(mut npc) = g.ecs.get_mut::<Npc>(npc1) {
+                npc.ui(|ui, _| {
+                    paragraph(
+                        ui,
+                        concat!(
+                            "I'm going to have to ask you to \n",
+                            "ruthlessly destroy a scarecrow I \n",
+                            "painstakingly made from scratch \n",
+                            "over the course of several days \n",
+                            "because this game takes place \n",
+                            "before modern manufacturing practices, \n",
+                            "but it's fine because it's not \n",
+                            "like I have anything else to do other \n",
+                            "than stand here pretending to work on \n",
+                            "another one!",
+                        ),
+                    )
+                });
+            }
         }),
         ..Default::default()
     });
 
-    ecs.spawn(npc(vec2(-4.0, 0.0)));
     let scarecrow = ecs.spawn((
         vec2(3.4, -2.4),
-        Phys::pushfoot_bighit(),
+        Phys::new().pushfoot_bighit(),
         Health::full(5),
         HealthBar,
         Art::Scarecrow,
     ));
+
     tasks.push(Task {
         label: "Destroy Scarecrow",
         req: Box::new(move |g| g.dead(scarecrow)),
         guide: Box::new(move |g, gi| gi.push((Art::Sword, g.pos(scarecrow)))),
+        on_finish: Box::new({
+            use {Consumable::*, Trinket::*};
+
+            #[rustfmt::skip]
+            let mut reward = RewardChoice::new(hash!(), &[
+                (Item::Consumable(HealthPotion), 5, "x5 Health Potions", Some(concat!(
+                    "40 hitpoints worth of regeneration. \n",
+                    "You have 10 hitpoints currently. \n",
+                ))),
+                (Item::Trinket(StoneRing), 1, "Stone Ring", None),
+            ]);
+
+            move |g| {
+                if let Ok(mut npc) = g.ecs.get_mut::<Npc>(npc1) {
+                    npc.ui(move |ui, g| {
+                        paragraph(
+                            ui,
+                            concat!(
+                                "As you have proven yourself \n",
+                                "capable of obliterating inanimate \n",
+                                "objects which are rarely fearsome \n",
+                                "enough even to repel birds \n",
+                                "characterized by their extreme \n",
+                                "cowardice, any doubts I may have \n",
+                                "had as to your ability to save us \n",
+                                "from inescapable doom are certainly \n",
+                                "assuaged. Allow me to award you with \n",
+                                "some token of my appreciation. \n",
+                            ),
+                        );
+
+                        for item in reward.ui(ui).into_iter() {
+                            or_err!(g.give_item(hero, item));
+                        }
+
+                        paragraph(
+                            ui,
+                            concat!(
+                                "I urge you to talk to NPC 2, who will \n",
+                                "open the gate for you. Once inside \n",
+                                "the pen, attempt to slaughter the \n",
+                                "innocent looking creatures inside. \n",
+                                "Show no remorse, adventurer. Soon \n",
+                                "our plight will be known to you.",
+                            ),
+                        )
+                    });
+                }
+            }
+        }),
         ..Default::default()
     });
 
-    let npc2 = ecs.spawn(npc(vec2(4.0, 11.0)));
+    let npc2 = ecs.spawn(npc(
+        vec2(4.0, 11.0),
+        Npc::new("NPC 2").with_paragraph(concat!(
+            "Greetings! \n",
+            "I can open this gate for you, \n",
+            "but you don't look ready. \n",
+        )),
+    ));
     let npc2_guide =
         move |g: &Game, gi: &mut Vec<_>| gi.push((Art::Arrow, g.pos(npc2) + vec2(0.0, 0.9)));
 
@@ -1419,7 +1988,7 @@ async fn main() {
                     Wander::around(pen.pos, r),
                     Velocity::default(),
                     Innocence::Unwavering,
-                    Phys::pushfoot_bighit(),
+                    Phys::new().pushfoot_bighit(),
                     Health::full(1),
                 ))
             }))
@@ -1451,7 +2020,31 @@ async fn main() {
             label: "Talk to NPC 2",
             req: Box::new(move |g| g.hero_dist_ent(npc2) < 1.3),
             guide: Box::new(npc2_guide),
-            on_finish: Box::new(move |g| pen.gate_open(&mut g.ecs)),
+            on_finish: Box::new(move |g| {
+                if let Ok(mut npc) = g.ecs.get_mut::<Npc>(npc2) {
+                    npc.ui(|ui, _| {
+                        paragraph(
+                            ui,
+                            concat!(
+                                "Oh, adventurer, \n",
+                                "I'm so glad you've come along! \n",
+                                "In fact, it's almost like I've \n",
+                                "just been standing here since \n",
+                                "the dawn of time itself, waiting \n",
+                                "for someone to come help me. In fact, \n",
+                                "it's almost as if I was created simply \n",
+                                "to give you something to do. \n",
+                                "\n",
+                                "In this pen are the last \n",
+                                "Tripletufted Terrorworms known to exist, \n",
+                                "and I need you to forgo your conscience \n",
+                                "and simply slaughter them: no remorse."
+                            ),
+                        )
+                    });
+                }
+                pen.gate_open(&mut g.ecs)
+            }),
             ..Default::default()
         },
         Task {
@@ -1529,14 +2122,7 @@ async fn main() {
     quests.add(Quest {
         title: "RPG Tropes I",
         completion_quip: "Try not to poke your eye out, like the last adventurer ...",
-        unlock_description: concat!(
-            "It's dangerous to go alone! \n",
-            "Allow me to give you, a complete stranger, dangerous weapons \n",
-            "because I just happen to believe that you may be capable and willing \n",
-            "to spare us from the horrible fate that will surely befall us regardless \n",
-            "of whether or not you spend three hours immersed in a fishing minigame.",
-        ),
-        completion: QuestCompletion::Unlocked,
+        completion: QuestCompletion::Accepted { on_tick: 0 },
         tasks,
         ..Default::default()
     });
@@ -1544,13 +2130,7 @@ async fn main() {
     const STEP_EVERY: f64 = 1.0 / 60.0;
     let mut time = STEP_EVERY;
     let mut step = get_time();
-    let mut game = Game {
-        ecs,
-        hero_pos: Vec2::zero(),
-        tick: 0,
-        mouse_pos: Vec2::zero(),
-        mouse_down_tick: None,
-    };
+    let mut game = Game::new(ecs);
     loop {
         time += get_time() - step;
         step = get_time();
@@ -1573,7 +2153,7 @@ async fn main() {
             keeper_of_bags.keep(&mut game.ecs);
             wander(&mut game.ecs);
 
-            update_hero(hero, &mut game, &mut quests);
+            update_hero(hero, &mut game, &mut quests, &mut bag_ui);
 
             drawer.update(&mut game);
         }
@@ -1586,6 +2166,7 @@ async fn main() {
         }
 
         quests.ui(&game);
+        npc_ui.ui(&mut game);
         if let Ok(bag) = game.ecs.get_mut(hero).as_deref_mut() {
             bag_ui.ui(bag);
         }
@@ -1601,12 +2182,24 @@ async fn main() {
 struct Game {
     ecs: hecs::World,
     hero_pos: Vec2,
+    hero_swinging: bool,
     /// In game coordinates
     mouse_pos: Vec2,
     mouse_down_tick: Option<u32>,
     tick: u32,
 }
 impl Game {
+    fn new(ecs: hecs::World) -> Self {
+        Self {
+            ecs,
+            hero_pos: Vec2::zero(),
+            hero_swinging: false,
+            tick: 0,
+            mouse_pos: Vec2::zero(),
+            mouse_down_tick: None,
+        }
+    }
+
     fn dead(&self, e: hecs::Entity) -> bool {
         !self.ecs.contains(e)
     }
@@ -1637,9 +2230,13 @@ impl Game {
     /// the second field represents knockback.
     fn hit(
         &mut self,
-        HitInput { hitter_pos, hit: WeaponHit { hit }, damage, knockback }: HitInput,
+        HitInput { hitter_pos, hit: WeaponHit { hit }, mut damage, knockback, crit_chance }: HitInput,
     ) -> (bool, Vec2) {
         let tick = self.tick;
+
+        if rand::gen_range(0.0, 1.0) < crit_chance {
+            damage *= 3;
+        }
 
         if let Ok((Health(hp, _), vel, &pos, ino)) =
             self.ecs
@@ -1669,6 +2266,7 @@ impl Game {
 struct HitInput {
     hitter_pos: Vec2,
     hit: WeaponHit,
+    crit_chance: f32,
     damage: u32,
     knockback: f32,
 }
@@ -1707,7 +2305,6 @@ impl Task {
 #[derive(Default)]
 struct Quest {
     title: &'static str,
-    unlock_description: &'static str,
     completion_quip: &'static str,
     tasks: Vec<Task>,
     unlocks: Vec<usize>,
@@ -1824,9 +2421,9 @@ impl Quests {
             quests: QuestVec(Vec::with_capacity(100)),
             temp: Vec::with_capacity(100),
             tab_titles: [(); 3].map(|_| String::with_capacity(25)),
-            new_tabs: [true, false, false],
+            new_tabs: [false; 3],
             jump_to_tab: None,
-            window_open: true,
+            window_open: false,
             guide_ents: Vec::with_capacity(100),
             guides: Vec::with_capacity(100),
             icon_ent: ecs.spawn((vec2(0.0, 0.0), Art::Compass, ZOffset(-999.0))),
@@ -1918,12 +2515,9 @@ impl Quests {
     }
 
     fn unlocked_ui(&mut self, ui: &mut megaui::Ui, tick: u32) {
-        use megaui::widgets::Label;
-
         ui.separator();
         for (_, quest) in self.quests.unlocked_mut() {
             ui.label(None, quest.title);
-            Label::new(quest.unlock_description).multiline(14.0).ui(ui);
             if ui.button(None, "Accept") {
                 quest.completion.accept(tick);
             }
@@ -1932,15 +2526,13 @@ impl Quests {
     }
 
     fn accepted_ui(&mut self, ui: &mut megaui::Ui) {
-        use megaui::hash;
-
         ui.separator();
         for (_, i, quest) in self.quests.accepted() {
             open_tree(ui, hash!(i), quest.title, |ui| {
                 for task in &quest.tasks {
                     ui.label(None, &task.label);
                     if !task.finished {
-                        return
+                        return;
                     }
                 }
             });
@@ -1949,15 +2541,10 @@ impl Quests {
     }
 
     fn finished_ui(&mut self, ui: &mut megaui::Ui) {
-        use megaui::{hash, widgets::Label};
-
         ui.separator();
         for (i, _, quest) in self.quests.finished() {
             open_tree(ui, hash!(i), quest.title, |ui| {
                 ui.label(None, quest.completion_quip);
-                ui.tree_node(hash!(i, "u"), "Unlock Text", |ui| {
-                    Label::new(quest.unlock_description).multiline(14.0).ui(ui);
-                });
             });
             ui.separator();
         }
@@ -1990,7 +2577,6 @@ impl Quests {
         use megaui_macroquad::{
             draw_window,
             megaui::{
-                hash,
                 widgets::{Group, Tabbar},
                 Vector2,
             },
@@ -2323,6 +2909,7 @@ impl Drawer {
                     draw_line(x, y, w, z, 0.135, DARKGRAY);
                     gl.pop_model_matrix()
                 }
+                Art::Consumable(_) | Art::Trinket(_) => {}
             };
         }
 
