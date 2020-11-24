@@ -40,6 +40,9 @@ fn float_cmp<T>(a: T, b: T, mut f: impl FnMut(T) -> f32) -> std::cmp::Ordering {
     f(a).partial_cmp(&f(b)).unwrap_or(std::cmp::Ordering::Greater)
 }
 
+#[derive(Debug, Copy, Clone)]
+struct MinVelocity(Vec2);
+
 #[derive(Debug, Copy, Clone, Default)]
 struct Velocity(Vec2);
 impl Velocity {
@@ -93,16 +96,16 @@ impl Phys {
     fn with(circles: &[Circle]) -> Self {
         let mut s = Self::new();
         for c in circles.iter().copied() {
-            s.insert(c);
+            s = s.insert(c);
         }
         s
     }
 
-    fn insert(&mut self, c: Circle) {
+    fn insert(mut self, c: Circle) -> Self {
         for slot in self.0.iter_mut() {
             if slot.is_none() {
                 *slot = Some(c);
-                return;
+                return self;
             }
         }
         panic!("no more than five circles");
@@ -116,27 +119,27 @@ impl Phys {
         self.0.iter().filter_map(|s| s.as_ref())
     }
 
-    fn pushfoot_bighit(mut self) -> Self {
-        self.insert(Circle::push(0.3, vec2(0.0, 0.1)));
-        self.insert(Circle::hit(0.4, vec2(0.0, 0.4)));
-        self
+    fn pushfoot_bighit(self) -> Self {
+        self.insert(Circle::push(0.3, vec2(0.0, 0.1))).insert(Circle::hit(0.4, vec2(0.0, 0.4)))
     }
 
-    fn pushfoot(mut self, r: f32) -> Self {
-        self.insert(Circle::push(r, vec2(0.0, r)));
-        self
+    fn wings(self, r: f32, wr: f32, kind: CircleKind) -> Self {
+        self.insert(Circle(r, vec2(0.0, r), kind))
+            .insert(Circle(wr, vec2(-r, r), kind))
+            .insert(Circle(wr, vec2(r, r), kind))
     }
 
-    fn wings(mut self, r: f32, wr: f32, kind: CircleKind) -> Self {
-        self.insert(Circle(r, vec2(0.0, r), kind));
-        self.insert(Circle(wr, vec2(-r, r), kind));
-        self.insert(Circle(wr, vec2(r, r), kind));
-        self
+    fn pushbox(self, r: f32) -> Self {
+        self.insert(Circle::push(r, vec2(0.0, r)))
     }
 
-    fn hurtbox(mut self, r: f32) -> Self {
-        self.insert(Circle::hit(r, vec2(0.0, r)));
-        self
+    #[allow(dead_code)]
+    fn hurtbox(self, r: f32) -> Self {
+        self.insert(Circle::hurt(r, vec2(0.0, r)))
+    }
+
+    fn hitbox(self, r: f32) -> Self {
+        self.insert(Circle::hit(r, vec2(0.0, r)))
     }
 }
 
@@ -225,8 +228,13 @@ impl Physics {
         system!(ecs, _,
             pos           = &mut Vec2
             Velocity(vel) = &mut _
+            min_vel       = Option<&MinVelocity>
         {
-            *pos += *vel;
+            if let Some(&MinVelocity(mv)) = min_vel {
+                *pos += vel.signum() * vel.abs().max(mv.abs());
+            } else {
+                *pos += *vel;
+            }
             *vel *= 0.93;
         });
 
@@ -360,6 +368,7 @@ struct Bag {
     weapon: Option<BagWeapon>,
     slots: [Option<Item>; BAG_SLOTS],
     trinkets: [Option<Trinket>; BAG_TRINKETS],
+    new_item: bool,
 }
 impl Bag {
     fn holding(item: Item) -> Self {
@@ -372,6 +381,12 @@ impl Bag {
         match item {
             Item::Weapon(wep) if self.weapon.is_none() => {
                 self.weapon = Some(BagWeapon::In { item: wep, wants_out: false });
+                self.new_item = true;
+                return;
+            }
+            Item::Trinket(t) if self.trinket_space().is_some() => {
+                self.trinkets[self.trinket_space().unwrap()] = Some(t);
+                self.new_item = true;
                 return;
             }
             _ => {}
@@ -380,9 +395,14 @@ impl Bag {
         let empty_slot = self.slots.iter_mut().find(|s| s.is_none());
         if let Some(slot) = empty_slot {
             *slot = Some(item);
+            self.new_item = true;
         } else {
             dbg!("lmao ignoring item");
         }
+    }
+
+    fn trinket_space(&self) -> Option<usize> {
+        self.trinkets.iter().enumerate().find(|(_, t)| t.is_none()).map(|(i, _)| i)
     }
 
     fn mods(&self) -> HeroMod {
@@ -451,7 +471,7 @@ impl BagUi {
     }
 
     fn size() -> Vec2 {
-        vec2(510.0, 250.0)
+        vec2(500.0, 250.0)
     }
 
     fn slot(&mut self, ui: &mut megaui::Ui, s: SlotHandle, art: Option<Art>, p: Vec2) {
@@ -496,9 +516,15 @@ impl BagUi {
             WindowParams,
         };
 
+        if bag.new_item {
+            self.icon_jumping = true;
+            bag.new_item = false;
+        }
+
         if !self.window_open {
             return;
         }
+        self.icon_jumping = false;
 
         self.moves.drain_filter(|&mut ItemMove { from, to }| match [from, to] {
             [SlotHandle::Loose(i0), SlotHandle::Loose(i1)] => {
@@ -595,12 +621,7 @@ impl BagUi {
                     );
                 }
 
-                let trinket_space = bag
-                    .trinkets
-                    .iter()
-                    .enumerate()
-                    .find(|(_, t)| t.is_none())
-                    .map(|(i, _)| SlotHandle::Trinket(i));
+                let trinket_space = bag.trinket_space().map(|i| SlotHandle::Trinket(i));
 
                 let info = match self.selected {
                     Some(SlotHandle::Loose(i)) => {
@@ -821,9 +842,19 @@ impl Weapon<'_> {
         }
     }
 
-    fn swinging(&self) -> bool {
-        if let Attack::Swing(_) = self.wep.attack {
-            true
+    /// Returns the direction the weapon is swinging toward if it is swinging.
+    fn swing_dir(&self) -> Option<Vec2> {
+        if let Attack::Swing(SwingState { toward, .. }) = self.wep.attack {
+            Some(toward)
+        } else {
+            None
+        }
+    }
+
+    /// The exact middle of the swing has been reached
+    fn mid_swing(&self, tick: u32) -> bool {
+        if let Attack::Swing(SwingState { end_tick, .. }) = self.wep.attack {
+            end_tick - tick == 25
         } else {
             false
         }
@@ -1004,7 +1035,7 @@ struct Hero<'a> {
     hp: &'a mut Health,
 }
 impl Hero<'_> {
-    fn movement(&mut self, multiplier: f32) {
+    fn movement(&mut self, mods: HeroMod, hero_swinging: bool) {
         #[rustfmt::skip]
         let keymap = [
             (KeyCode::W,  Vec2::unit_y()),
@@ -1021,14 +1052,14 @@ impl Hero<'_> {
 
         if move_vec.length_squared() > 0.0 {
             self.vel.0 += move_vec
-                * multiplier
+                * if hero_swinging { mods.swinging_movement } else { 1.0 }
                 * if self.bag.weapon.is_none()
                     || move_vec.x() == 0.0
                     || move_vec.x().signum() == self.dir.signum()
                 {
-                    0.0075
+                    0.0075 * mods.forward_movement
                 } else {
-                    0.0045
+                    0.0045 * mods.backward_movement
                 };
         }
 
@@ -1055,6 +1086,7 @@ enum Art {
     Hero,
     Consumable(Consumable),
     Trinket(Trinket),
+    Fireball,
     Compass,
     Scarecrow,
     Arrow,
@@ -1080,6 +1112,7 @@ impl Art {
             Art::Hero => "Hero",
             Art::Consumable(c) => c.name(),
             Art::Trinket(t) => t.name(),
+            Art::Fireball => "Fireball",
             Art::Scarecrow => "Scarecrow",
             Art::Arrow => "Arrow",
             Art::Chest => "Chest",
@@ -1101,8 +1134,9 @@ impl Art {
             Art::Lockbox => 0.5,
             Art::Compass => 0.5,
             Art::TripletuftedTerrorworm | Art::VioletVagabond | Art::Scarecrow => 0.4,
+            Art::Fireball => 0.5,
             Art::Tree => 2.0,
-            Art::Post => 1.0,
+            Art::Post => 1.05,
             Art::Trinket(_) | Art::Consumable(_) => 0.0,
         }
     }
@@ -1146,23 +1180,23 @@ macro_rules! trinkets {
         desc: $desc:expr,
     })* ) => {
         #[derive(Copy, Clone, Debug, PartialEq)]
-        enum Trinket { $( $name )* }
+        enum Trinket { $( $name, )* }
         impl Trinket {
             fn mods(self) -> HeroMod {
                 match self {
-                    $( Trinket::$name => $mods )*
+                    $( Trinket::$name => $mods, )*
                 }
             }
 
             fn name(self) -> &'static str {
                 match self {
-                    $( Trinket::$name => $display_name )*
+                    $( Trinket::$name => $display_name, )*
                 }
             }
 
             fn description(self) -> &'static str {
                 match self {
-                    $( Trinket::$name => $desc )*
+                    $( Trinket::$name => $desc, )*
                 }
             }
         }
@@ -1180,16 +1214,44 @@ trinkets! {
             "5% more often. \n",
         ),
     }
+    VolcanicShard: {
+        name: "Volcanic Shard",
+        mods: HeroMod { fireball_chance: 0.05, ..HeroMod::empty() },
+        desc: concat!(
+            "Shard of black glass. \n",
+            "Grants each attack \n",
+            "a 5% chance of \n",
+            "launching a fireball. \n",
+        ),
+    }
+    LoftyInsoles: {
+        name: "Lofty Insoles",
+        mods: HeroMod { forward_movement: 0.15, backward_movement: -0.15, ..HeroMod::empty() },
+        desc: concat!(
+            "Seems to caress your toes. \n",
+            "Move forward  15% faster, \n",
+            "Move backward 15% slower. \n",
+        ),
+    }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct HeroMod {
     swinging_movement: f32,
+    forward_movement: f32,
+    backward_movement: f32,
     crit_chance: f32,
+    fireball_chance: f32,
 }
 impl HeroMod {
     fn empty() -> Self {
-        Self { swinging_movement: 0.0, crit_chance: 0.00 }
+        Self {
+            swinging_movement: 0.0,
+            forward_movement: 0.0,
+            backward_movement: 0.0,
+            crit_chance: 0.0,
+            fireball_chance: 0.0,
+        }
     }
 }
 impl std::ops::Add<HeroMod> for HeroMod {
@@ -1198,14 +1260,23 @@ impl std::ops::Add<HeroMod> for HeroMod {
     fn add(self, othr: HeroMod) -> Self::Output {
         Self {
             swinging_movement: self.swinging_movement + othr.swinging_movement,
+            forward_movement: self.forward_movement + othr.forward_movement,
+            backward_movement: self.backward_movement + othr.backward_movement,
             crit_chance: self.crit_chance + othr.crit_chance,
+            fireball_chance: self.fireball_chance + othr.fireball_chance,
         }
     }
 }
 
 impl Default for HeroMod {
     fn default() -> Self {
-        HeroMod { swinging_movement: 1.0, crit_chance: 0.01, ..Self::empty() }
+        HeroMod {
+            swinging_movement: 1.0,
+            forward_movement: 1.0,
+            backward_movement: 1.0,
+            crit_chance: 0.01,
+            fireball_chance: 0.0,
+        }
     }
 }
 
@@ -1333,6 +1404,57 @@ fn circle_points(n: usize) -> impl Iterator<Item = Vec2> {
     (0..n).map(move |i| Rot((i as f32 / n as f32) * TAU).vec2())
 }
 
+#[derive(Copy, Clone)]
+struct Fireball {
+    damage: u32,
+    knockback: f32,
+    crit_chance: f32,
+}
+
+struct FireballHit {
+    fireball_ent: hecs::Entity,
+    fireball: Fireball,
+    hit: hecs::Entity,
+    pos: Vec2,
+}
+struct Fireballs {
+    dead: Vec<FireballHit>,
+}
+impl Fireballs {
+    fn new() -> Self {
+        Self { dead: Vec::with_capacity(100) }
+    }
+
+    fn update(&mut self, game: &mut Game, quests: &mut Quests) {
+        let Game { ecs, .. } = game;
+
+        system!(ecs, ent,
+            Contacts(hits) = &mut _
+            &pos           = &Vec2
+            &fireball      = &Fireball
+        {
+            if let Some(Hit { hit, .. }) = hits.pop() {
+                self.dead.push(FireballHit { fireball_ent: ent, fireball, hit, pos });
+            }
+        });
+
+        for FireballHit { fireball_ent, fireball, hit, pos } in self.dead.drain(..) {
+            let (dead, _) = game.hit(HitInput {
+                hitter_pos: pos,
+                hit: WeaponHit { hit },
+                damage: fireball.damage,
+                knockback: fireball.knockback,
+                crit_chance: fireball.crit_chance,
+            });
+            if dead {
+                quests.update(game);
+            }
+
+            or_err!(game.ecs.despawn(fireball_ent));
+        }
+    }
+}
+
 fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests, bag_ui: &mut BagUi) {
     let &Game { tick, mouse_pos, .. } = &*game;
     let Game { ecs, hero_swinging, .. } = game;
@@ -1342,28 +1464,20 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests, bag_ui:
         Ok(mut hero) => {
             let mods = hero.bag.mods();
 
-            hero.movement(if *hero_swinging {
-                mods.swinging_movement
-            } else {
-                1.0
-            });
+            hero.movement(mods, *hero_swinging);
 
             for consumable in bag_ui.stomach.drain(..) {
                 hero.consume(consumable);
             }
 
-            (
-                *hero.pos,
-                hero.vel.0,
-                *hero.dir,
-                hero.bag.weapon.as_mut().and_then(|w| w.out()),
-                mods,
-            )
+            (*hero.pos, hero.vel.0, *hero.dir, hero.bag.weapon.as_mut().and_then(|w| w.out()), mods)
         }
         Err(_) => return,
     };
     game.hero_pos = hero_pos;
 
+    let mut swing_dir = None;
+    let mut mid_swing = false;
     let hero_attacks = hero_wep
         .and_then(|e| ecs.query_one_mut::<Weapon>(e).ok())
         .map(|mut wep| {
@@ -1376,12 +1490,14 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests, bag_ui:
                 wielder_dir: hero_dir,
                 tick,
             });
-            *hero_swinging = wep.swinging();
+            mid_swing = wep.mid_swing(tick);
+            swing_dir = wep.swing_dir();
+            *hero_swinging = wep.swing_dir().is_some();
             wep.attack_hits()
         })
         .unwrap_or_default();
 
-    let knockback = hero_attacks.iter().fold(Vec2::zero(), |acc, &hit| {
+    let mut knockback = hero_attacks.iter().fold(Vec2::zero(), |acc, &hit| {
         let (dead, vel) = game.hit(HitInput {
             hitter_pos: hero_pos,
             hit,
@@ -1394,6 +1510,26 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests, bag_ui:
         }
         acc + vel
     });
+
+    if let Some(dir) = swing_dir
+        .filter(|_| mid_swing)
+        .filter(|_| rand::gen_range(0.0, 1.0) < hero_mods.fireball_chance)
+    {
+        knockback -= dir * 0.35;
+        game.ecs.spawn((
+            Art::Fireball,
+            Fireball { damage: 3, knockback: 0.2, crit_chance: hero_mods.crit_chance },
+            Phys::new()
+                .insert(Circle::hurt(0.4, Vec2::zero()))
+                .insert(Circle::push(0.1, Vec2::zero())),
+            Velocity(dir / 6.0),
+            MinVelocity(dir / 15.0),
+            hero_pos + dir * 2.0 + vec2(0.0, 0.5),
+            Rot(Rot::from_vec2(dir).0 + PI),
+            Contacts::default(),
+        ));
+    }
+
     if let Ok(mut v) = game.ecs.get_mut::<Velocity>(hero) {
         v.knockback(knockback, 0.125);
     }
@@ -1706,7 +1842,7 @@ impl NpcUi {
         let i = self.talks.values().filter(|(a, _)| *a).count();
 
         for (name, (active, talks)) in self.talks.iter_mut().filter(|(_, (a, _))| *a) {
-            let size = vec2(282.0, 280.0);
+            let size = vec2(282.0, 400.0);
             *active = draw_window(
                 hash!(name),
                 vec2(screen_width(), screen_height()) / 2.0 - size * (0.4 + 0.05 * i as f32),
@@ -1739,6 +1875,7 @@ async fn main() {
     let mut ecs = hecs::World::new();
     let mut drawer = Drawer::new();
     let mut waffle = Waffle::new();
+    let mut fireballs = Fireballs::new();
     let mut physics = Physics::new();
     let mut bag_ui = BagUi::new(&mut ecs);
     let mut npc_ui = NpcUi::new();
@@ -1752,7 +1889,7 @@ async fn main() {
     let hero = ecs.spawn((
         vec2(-0.4, -3.4),
         Velocity::default(),
-        Phys::new().wings(0.3, 0.21, CircleKind::Push).hurtbox(0.5),
+        Phys::new().wings(0.3, 0.21, CircleKind::Push).hitbox(0.5),
         Art::Hero,
         Direction::Left,
         Health::full(10),
@@ -1792,7 +1929,7 @@ async fn main() {
         }
 
         fn post(&self, post_pos: Vec2) -> Post {
-            (post_pos * self.radius + self.pos, Art::Post, Phys::new().pushfoot(0.4))
+            (post_pos * self.radius + self.pos, Art::Post, Phys::new().pushbox(0.4))
         }
 
         fn gate_open(&self, ecs: &mut hecs::World) {
@@ -1809,7 +1946,7 @@ async fn main() {
     }
 
     fn tree(ecs: &mut hecs::World, p: Vec2) {
-        ecs.spawn((p, Art::Tree, Phys::new().pushfoot(0.4)));
+        ecs.spawn((p, Art::Tree, Phys::new().pushbox(0.4)));
     }
     for p in circle_points(5) {
         tree(&mut ecs, p * 6.0 + vec2(-21.5, -20.0));
@@ -2111,9 +2248,46 @@ async fn main() {
             label: "Exit the Pen",
             req: Box::new(move |g| g.hero_dist(pen_pos) > pen_radius * 1.2),
             guide: Box::new(npc2_guide),
-            on_finish: Box::new(move |g| {
-                terrorworms.refill(g, pen);
-                pen.gate_close(&mut g.ecs)
+            on_finish: Box::new({
+                use Trinket::*;
+                #[rustfmt::skip]
+                let mut reward = RewardChoice::new(hash!(), &[
+                    (Item::Trinket(VolcanicShard), 1, "Volcanic Shard", None),
+                    (Item::Trinket(LoftyInsoles), 1, "Lofty Insoles", None),
+                ]);
+
+                move |g| {
+                    terrorworms.refill(g, pen);
+                    pen.gate_close(&mut g.ecs);
+                    if let Ok(mut npc) = g.ecs.get_mut::<Npc>(npc2) {
+                        npc.ui(move |ui, g| {
+                            paragraph(
+                                ui,
+                                concat!(
+                                    "Your admirable conduct has confirmed our \n",
+                                    "prophecies! Please, take a trinket!\n",
+                                ),
+                            );
+
+                            for item in reward.ui(ui).into_iter() {
+                                or_err!(g.give_item(hero, item));
+                            }
+
+                            paragraph(
+                                ui,
+                                concat!(
+                                    "The slaughtered Tripletufted Terrorworms \n",
+                                    "have simply returned. They will continue \n",
+                                    "to grow in number until this pen, \n",
+                                    "and eventually our simple way of life, \n",
+                                    "is consumed by them. It is fortold that the \n",
+                                    "only way we can stop them is by forging the \n",
+                                    "Honeycoated Heptahorn.\n",
+                                ),
+                            );
+                        });
+                    }
+                }
             }),
             ..Default::default()
         },
@@ -2151,6 +2325,7 @@ async fn main() {
             bag_ui.update_icon(&mut game, &drawer);
             waffle.update(&mut game);
             keeper_of_bags.keep(&mut game.ecs);
+            fireballs.update(&mut game, &mut quests);
             wander(&mut game.ecs);
 
             update_hero(hero, &mut game, &mut quests, &mut bag_ui);
@@ -2182,6 +2357,7 @@ async fn main() {
 struct Game {
     ecs: hecs::World,
     hero_pos: Vec2,
+    /// Any stage of swinging
     hero_swinging: bool,
     /// In game coordinates
     mouse_pos: Vec2,
@@ -2692,7 +2868,13 @@ impl DamageLabelBin {
         for (_, &DamageLabel { hp, pos, tick }) in ecs.query::<&_>().iter() {
             *text = hp.to_string();
             let (x, y) = cam.world_to_screen(pos).into();
-            draw_text(text, x - 20.0, y - 120.0 - (game_tick - tick) as f32, 42.0, MAROON);
+            draw_text(
+                text,
+                x - 20.0,
+                y - 120.0 - (game_tick - tick) as f32,
+                42.0 * (1.0 + ((hp as f32).abs() - 1.0) / 3.0),
+                MAROON,
+            );
         }
     }
 }
@@ -2744,7 +2926,8 @@ impl Drawer {
         self.damage_labels.draw(game, &self.cam);
     }
 
-    fn sprites(&mut self, Game { ecs, .. }: &Game) {
+    fn sprites(&mut self, Game { ecs, tick, .. }: &Game) {
+        let tick = *tick;
         let Self { screen, sprites, cam, .. } = self;
         cam.zoom = vec2(1.0, screen_width() / screen_height()) / 7.8;
         set_camera(*cam);
@@ -2869,6 +3052,33 @@ impl Drawer {
                     draw_circle(x, y + r, r, BROWN);
                     draw_rectangle(x - w / 2.0, y + r, w, h, BROWN);
                     draw_circle(x, y + h + r, 0.4, BEIGE);
+                }
+                Art::Fireball => {
+                    push_model_matrix();
+                    let mut color = ORANGE;
+                    for q in 0..10 {
+                        let i = q % 5;
+                        let w = (5 - i) as f32 / 5.0 * 0.4 + 0.1;
+                        color.0[3] = 60 + 30 * ((5 - i) as u8 / 5);
+                        draw_rectangle(
+                            w / -2.0 + i as f32 / 6.0 + q as f32 / 85.0,
+                            ((tick + q * 3) as f32 / 5.0).sin() * (i as f32 / 4.5).max(0.05) * 0.65
+                                - w / 2.0,
+                            w,
+                            w,
+                            color,
+                        );
+                    }
+                    color = RED;
+                    color.0[3] = 100;
+                    draw_rectangle(
+                        0.3 / -2.0,
+                        0.3 / -2.0 + (tick as f32 / 5.0).sin() * 0.02,
+                        0.3,
+                        0.3,
+                        color,
+                    );
+                    gl.pop_model_matrix();
                 }
                 Art::Arrow => {
                     push_model_matrix();
