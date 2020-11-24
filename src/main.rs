@@ -58,6 +58,10 @@ enum CircleKind {
     Push,
     Hurt,
     Hit,
+    /// Can be pushed, but they can't push others
+    GhostPush,
+    /// Can hit Hurt, but doesn't register as a hit for the Hurt
+    GhostHit,
 }
 impl CircleKind {
     fn hits(self, o: Self) -> bool {
@@ -65,6 +69,8 @@ impl CircleKind {
         match (self, o) {
             (Push, Push) => true,
             (Hurt, Hit) => true,
+            (GhostPush, Push) => true,
+            (GhostHit, Hurt) => true,
             _ => false,
         }
     }
@@ -83,6 +89,14 @@ impl Circle {
 
     fn hit(r: f32, offset: Vec2) -> Self {
         Self(r, offset, CircleKind::Hit)
+    }
+
+    fn ghost_push(r: f32, offset: Vec2) -> Self {
+        Self(r, offset, CircleKind::GhostPush)
+    }
+    
+    fn ghost_hit(r: f32, offset: Vec2) -> Self {
+        Self(r, offset, CircleKind::GhostHit)
     }
 }
 
@@ -1087,6 +1101,7 @@ enum Art {
     Consumable(Consumable),
     Trinket(Trinket),
     Fireball,
+    Xp,
     Compass,
     Scarecrow,
     Arrow,
@@ -1113,6 +1128,7 @@ impl Art {
             Art::Consumable(c) => c.name(),
             Art::Trinket(t) => t.name(),
             Art::Fireball => "Fireball",
+            Art::Xp => "Xp",
             Art::Scarecrow => "Scarecrow",
             Art::Arrow => "Arrow",
             Art::Chest => "Chest",
@@ -1132,6 +1148,7 @@ impl Art {
             Art::Arrow | Art::Chest | Art::Npc | Art::Sword => GOLDEN_RATIO / 2.0,
             Art::Hero => 0.5,
             Art::Lockbox => 0.5,
+            Art::Xp => 0.05,
             Art::Compass => 0.5,
             Art::TripletuftedTerrorworm | Art::VioletVagabond | Art::Scarecrow => 0.4,
             Art::Fireball => 0.5,
@@ -1455,7 +1472,60 @@ impl Fireballs {
     }
 }
 
-fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests, bag_ui: &mut BagUi) {
+struct Levels {
+    dead_xp: Vec<hecs::Entity>,
+    level: u32,
+    xp: u32,
+}
+impl Levels {
+    fn new() -> Self {
+        Self {
+            dead_xp: Vec::with_capacity(100),
+            level: 0,
+            xp: 0,
+        }
+    }
+
+    fn xp_needed(&self) -> u32 {
+        match self.level {
+            0 => 5,
+            1 => 25,
+            2 => 125,
+            3 => 250,
+            4 => 1000,
+            _ => 2500,
+        }
+    }
+
+    fn collect(&mut self, xp: hecs::Entity) {
+        self.dead_xp.push(xp);
+    }
+
+    fn ratio(&self) -> f32 {
+        self.xp as f32 / self.xp_needed() as f32
+    }
+
+    fn update(&mut self, Game { ecs, .. }: &mut Game) {
+        for xp in self.dead_xp.drain(..) {
+            if ecs.despawn(xp).is_ok() {
+                self.xp += 1;
+            }
+        }
+
+        if self.xp >= self.xp_needed() {
+            self.xp -= self.xp_needed();
+            self.level += 1;
+        }
+    }
+}
+
+fn update_hero(
+    hero: hecs::Entity,
+    game: &mut Game,
+    quests: &mut Quests,
+    bag_ui: &mut BagUi,
+    levels: &mut Levels,
+) {
     let &Game { tick, mouse_pos, .. } = &*game;
     let Game { ecs, hero_swinging, .. } = game;
 
@@ -1475,6 +1545,27 @@ fn update_hero(hero: hecs::Entity, game: &mut Game, quests: &mut Quests, bag_ui:
         Err(_) => return,
     };
     game.hero_pos = hero_pos;
+
+    system!(ecs, xp,
+        &Xp(good_tick) = &_
+        pos           = &mut Vec2
+        Contacts(hits) = &_
+    {
+        if tick < good_tick {
+            continue;
+        }
+
+        let dist = (hero_pos - *pos).length();
+        if dist < 3.0 {
+            *pos += (hero_pos - *pos).normalize() * (3.0 - dist) / 20.0;
+        }
+
+        for &Hit { hit, .. } in hits.iter() {
+            if hit == hero || Some(hit) == hero_wep {
+                levels.collect(xp);
+            }
+        }
+    });
 
     let mut swing_dir = None;
     let mut mid_swing = false;
@@ -1870,12 +1961,19 @@ impl NpcUi {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
+struct Xp(u32);
+
+#[derive(Copy, Clone, Debug)]
+struct SpillXp(usize);
+
 #[macroquad::main("rpg")]
 async fn main() {
     let mut ecs = hecs::World::new();
     let mut drawer = Drawer::new();
     let mut waffle = Waffle::new();
     let mut fireballs = Fireballs::new();
+    let mut levels = Levels::new();
     let mut physics = Physics::new();
     let mut bag_ui = BagUi::new(&mut ecs);
     let mut npc_ui = NpcUi::new();
@@ -1900,7 +1998,8 @@ async fn main() {
         Art::Chest,
         Phys::new().wings(0.4, 0.4, CircleKind::Push).wings(0.4, 0.4, CircleKind::Hit),
         Velocity::default(),
-        Health::full(5),
+        Health::full(7),
+        SpillXp(15),
     ));
 
     type Post = (Vec2, Art, Phys);
@@ -1969,6 +2068,7 @@ async fn main() {
             Health::full(7),
             HealthBar,
             Art::VioletVagabond,
+            SpillXp(50),
             Fighter {
                 behavior: FighterBehavior::LowHealthStab,
                 chase_speed: 0.0085,
@@ -2040,6 +2140,7 @@ async fn main() {
         Health::full(5),
         HealthBar,
         Art::Scarecrow,
+        SpillXp(3),
     ));
 
     tasks.push(Task {
@@ -2127,6 +2228,7 @@ async fn main() {
                     Innocence::Unwavering,
                     Phys::new().pushfoot_bighit(),
                     Health::full(1),
+                    SpillXp(4),
                 ))
             }))
         }
@@ -2231,6 +2333,7 @@ async fn main() {
                             },
                             Bag::holding(Item::sword(tw)),
                             Health::full(2),
+                            SpillXp(8),
                             HealthBar,
                         ),
                     ));
@@ -2326,9 +2429,10 @@ async fn main() {
             waffle.update(&mut game);
             keeper_of_bags.keep(&mut game.ecs);
             fireballs.update(&mut game, &mut quests);
+            levels.update(&mut game);
             wander(&mut game.ecs);
 
-            update_hero(hero, &mut game, &mut quests, &mut bag_ui);
+            update_hero(hero, &mut game, &mut quests, &mut bag_ui, &mut levels);
 
             drawer.update(&mut game);
         }
@@ -2337,7 +2441,17 @@ async fn main() {
         if let Ok(&hp) = game.ecs.get::<Health>(hero).as_deref() {
             let screen = vec2(screen_width(), screen_height());
             let size = vec2(screen.x() * (1.0 / 6.0), 30.0);
-            health_bar(size, hp.ratio(), vec2(size.x() / 2.0 + 30.0, 70.0));
+            let p = vec2(size.x() / 2.0 + 35.0, 70.0);
+            let mut color = health_bar(size, hp.ratio(), p);
+            color.0[3] = 255;
+            draw_text("HP", 5.0, 21.5, 30.0, color);
+
+            draw_text("XP", 5.0, 74.5, 30.0, VIOLET);
+            let mut color = VIOLET;
+            color.0[3] = 150;
+            #[rustfmt::skip]
+            draw_rectangle(35.0, p.y() * 1.15, size.x() * levels.ratio(), size.y(), color);
+            draw_rectangle_lines(35.0, p.y() * 1.15, size.x(), size.y(), 10.0, GRAY);
         }
 
         quests.ui(&game);
@@ -2373,6 +2487,21 @@ impl Game {
             tick: 0,
             mouse_pos: Vec2::zero(),
             mouse_down_tick: None,
+        }
+    }
+
+    fn xp(&mut self, pos: Vec2, amount: usize) {
+        for _ in 0..amount {
+            self.ecs.spawn((
+                pos,
+                Velocity(rand_vec2() * rand::gen_range(0.05, 0.1)),
+                Art::Xp,
+                Contacts::default(),
+                Xp(self.tick + 10),
+                Phys::new()
+                    .insert(Circle::ghost_hit(0.2, vec2(0.0, 0.05)))
+                    .insert(Circle::ghost_push(0.1, vec2(0.0, 0.05))),
+            ));
         }
     }
 
@@ -2414,12 +2543,13 @@ impl Game {
             damage *= 3;
         }
 
-        if let Ok((Health(hp, _), vel, &pos, ino, fighter)) = self.ecs.query_one_mut::<(
+        if let Ok((Health(hp, _), vel, &pos, ino, fighter, spill_xp)) = self.ecs.query_one_mut::<(
             &mut _,
             Option<&mut Velocity>,
             &Vec2,
             Option<&Innocence>,
             Option<&mut Fighter>,
+            Option<&SpillXp>,
         )>(hit)
         {
             if let Some(true) = ino.map(|i| i.active(tick)) {
@@ -2437,6 +2567,10 @@ impl Game {
             *hp = hp.saturating_sub(damage);
             let dead = *hp == 0;
             if dead {
+                if let Some(&SpillXp(n)) = spill_xp {
+                    self.xp(pos, n);
+                }
+
                 or_err!(self.ecs.despawn(hit));
             }
             self.ecs.spawn((DamageLabel { tick, hp: -(damage as i32), pos },));
@@ -2887,7 +3021,7 @@ impl DamageLabelBin {
     }
 }
 
-fn health_bar(size: Vec2, ratio: f32, pos: Vec2) {
+fn health_bar(size: Vec2, ratio: f32, pos: Vec2) -> Color {
     fn lerp_color(Color(a): Color, Color(b): Color, t: f32) -> Color {
         pub fn lerp(a: u8, b: u8, t: f32) -> u8 {
             a + (((b - a) as f32 / 255.0 * t) * 255.0) as u8
@@ -2903,6 +3037,8 @@ fn health_bar(size: Vec2, ratio: f32, pos: Vec2) {
     draw_rectangle_lines(x, y, w, h, size.y() * 0.3, color);
     color.0[3] = 100;
     draw_rectangle(x, y, w * ratio, h, color);
+
+    color
 }
 
 type SpriteData = (Vec2, Art, ZOffset, Option<Rot>, Option<Scale>);
@@ -3060,6 +3196,23 @@ impl Drawer {
                     draw_circle(x, y + r, r, BROWN);
                     draw_rectangle(x - w / 2.0, y + r, w, h, BROWN);
                     draw_circle(x, y + h + r, 0.4, BEIGE);
+                }
+                Art::Xp => {
+                    let mut color = VIOLET;
+                    color.0[3] = 85;
+                    let o = (x + y + tick as f32 / 10.0).sin() * 0.08;
+                    draw_circle(
+                        x,
+                        y + 0.05 + o,
+                        0.1,
+                        color,
+                    );
+                    draw_circle(
+                        x,
+                        y + 0.05 + o * 1.1,
+                        0.05,
+                        color,
+                    );
                 }
                 Art::Fireball => {
                     push_model_matrix();
