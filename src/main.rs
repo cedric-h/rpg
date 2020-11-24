@@ -2414,12 +2414,20 @@ impl Game {
             damage *= 3;
         }
 
-        if let Ok((Health(hp, _), vel, &pos, ino)) =
-            self.ecs
-                .query_one_mut::<(&mut _, Option<&mut Velocity>, &Vec2, Option<&Innocence>)>(hit)
+        if let Ok((Health(hp, _), vel, &pos, ino, fighter)) = self.ecs.query_one_mut::<(
+            &mut _,
+            Option<&mut Velocity>,
+            &Vec2,
+            Option<&Innocence>,
+            Option<&mut Fighter>,
+        )>(hit)
         {
             if let Some(true) = ino.map(|i| i.active(tick)) {
                 return (false, Vec2::zero());
+            }
+
+            if let Some(fighter) = fighter {
+                fighter.aggroed = true;
             }
 
             if let Some(v) = vel {
