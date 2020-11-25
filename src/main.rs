@@ -94,7 +94,7 @@ impl Circle {
     fn ghost_push(r: f32, offset: Vec2) -> Self {
         Self(r, offset, CircleKind::GhostPush)
     }
-    
+
     fn ghost_hit(r: f32, offset: Vec2) -> Self {
         Self(r, offset, CircleKind::GhostHit)
     }
@@ -485,7 +485,7 @@ impl BagUi {
     }
 
     fn size() -> Vec2 {
-        vec2(500.0, 250.0)
+        vec2(550.0, 250.0)
     }
 
     fn slot(&mut self, ui: &mut megaui::Ui, s: SlotHandle, art: Option<Art>, p: Vec2) {
@@ -599,7 +599,7 @@ impl BagUi {
             size,
             WindowParams { label: "Items - toggle with E".to_string(), ..Default::default() },
             |ui| {
-                let pane = Vector2::new(size.x() * 0.3, size.y() - 25.0);
+                let pane = Vector2::new(165.0, size.y() - 22.0);
                 Group::new(hash!(), pane).position(Vector2::new(5.0, 5.0)).ui(ui, |ui| {
                     ui.label(Vector2::new(80.0, 35.0), "<- Weapon");
                     self.slot(
@@ -653,7 +653,8 @@ impl BagUi {
                 if let Some((art, desc)) = info {
                     let name = art.name();
 
-                    Group::new(hash!(), pane).position(Vector2::new(345.0, 5.0)).ui(ui, |ui| {
+                    let pane = Vector2::new(185.0, size.y() - 22.0);
+                    Group::new(hash!(), pane).position(Vector2::new(360.0, 5.0)).ui(ui, |ui| {
                         Group::new(hash!(), Vector2::new(100.0, 100.0))
                             .position(Vector2::new((pane.x - 100.0) / 2.0, 10.0))
                             .ui(ui, |ui| ui.label(None, name));
@@ -1107,6 +1108,7 @@ enum Art {
     Arrow,
     Chest,
     Lockbox,
+    Book,
     TripletuftedTerrorworm,
     VioletVagabond,
     Tree,
@@ -1133,6 +1135,7 @@ impl Art {
             Art::Arrow => "Arrow",
             Art::Chest => "Chest",
             Art::Lockbox => "Lockbox",
+            Art::Book => "Grey Book",
             Art::Compass => "Compass",
             Art::TripletuftedTerrorworm => "Tripletufted Terrorworm",
             Art::VioletVagabond => "Violet Vagabond",
@@ -1145,7 +1148,7 @@ impl Art {
 
     fn bounding(self) -> f32 {
         match self {
-            Art::Arrow | Art::Chest | Art::Npc | Art::Sword => GOLDEN_RATIO / 2.0,
+            Art::Book | Art::Arrow | Art::Chest | Art::Npc | Art::Sword => GOLDEN_RATIO / 2.0,
             Art::Hero => 0.5,
             Art::Lockbox => 0.5,
             Art::Xp => 0.05,
@@ -1476,14 +1479,129 @@ struct Levels {
     dead_xp: Vec<hecs::Entity>,
     level: u32,
     xp: u32,
+    icon_ent: hecs::Entity,
+    window_open: bool,
+    icon_jumping: bool,
 }
 impl Levels {
-    fn new() -> Self {
+    fn new(ecs: &mut hecs::World) -> Self {
         Self {
             dead_xp: Vec::with_capacity(100),
             level: 0,
             xp: 0,
+            icon_ent: ecs.spawn((vec2(3.0, 0.0), Art::Book, ZOffset(-999.0))),
+            window_open: false,
+            icon_jumping: false,
         }
+    }
+
+    fn update_icon(&mut self, g: &mut Game, drawer: &Drawer) {
+        if let Ok(mut pos) = g.ecs.get_mut::<Vec2>(self.icon_ent) {
+            let bob =
+                if self.icon_jumping { (g.tick as f32 / 8.0).sin().abs() * 0.25 } else { 0.0 };
+            *pos = drawer.cam.target - drawer.screen * vec2(1.0, -1.0) + vec2(2.5, 0.1 + bob);
+
+            if is_key_pressed(KeyCode::R)
+                || g.mouse_down_tick == Some(g.tick)
+                    && (*pos + vec2(0.0, 0.5) - g.mouse_pos).length() < 0.5
+            {
+                self.window_open = !self.window_open;
+            }
+        }
+    }
+
+    fn size() -> Vec2 {
+        vec2(500.0, 250.0)
+    }
+
+    fn mods(&self) -> HeroMod {
+        HeroMod::empty()
+    }
+
+    fn ui(&mut self, game: &mut Game) {
+        use megaui_macroquad::{
+            draw_window,
+            megaui::{
+                widgets::{Group, Tabbar},
+                Vector2,
+            },
+            WindowParams,
+        };
+
+        if !self.window_open {
+            return;
+        }
+
+        self.icon_jumping = false;
+
+        let size = Self::size();
+
+        fn speed_fmt(amt: f32) -> String {
+            let relative = amt - 1.0;
+            if relative < 0.0 {
+                format!("{:.2}% slower", relative * 100.0)
+            } else {
+                format!("{:.2}% faster", relative * 100.0)
+            }
+        }
+
+        self.window_open = draw_window(
+            hash!(),
+            vec2(screen_width(), screen_height()) / 2.0 - size * vec2(0.6, 0.1),
+            size,
+            WindowParams { label: "Levels - toggle with R".to_string(), ..Default::default() },
+            |ui| {
+                let pane = Vector2::new(size.x() * 0.5, size.y() - 25.0);
+                Group::new(hash!(), pane).position(Vector2::new(5.0, 5.0)).ui(ui, |ui| {
+                    let default_mod = HeroMod::default();
+                    let mods = game.hero_mod;
+
+                    ui.label(
+                        None,
+                        &format!("   Level {}: {} / {}", self.level, self.xp, self.xp_needed()),
+                    );
+                    ui.separator();
+                    ui.label(None, "     Attack Boosts");
+                    ui.label(None, &format!("Critical Hit Chance: {:.2}%", mods.crit_chance * 100.0));
+                    if mods.fireball_chance != default_mod.fireball_chance {
+                        ui.label(
+                            None,
+                            &format!("Fireball Chance: {:.2}%", mods.fireball_chance * 100.0),
+                        );
+                    }
+
+                    ui.separator();
+                    ui.label(None, "     Movement");
+                    if mods.forward_movement != default_mod.forward_movement {
+                        ui.label(
+                            None,
+                            &format!(
+                                "Forward Movement: {}",
+                                speed_fmt(mods.forward_movement)
+                            ),
+                        );
+                    }
+                    if mods.backward_movement != default_mod.backward_movement {
+                        ui.label(
+                            None,
+                            &format!(
+                                "Backward Movement: {}",
+                                speed_fmt(mods.backward_movement)
+                            ),
+                        );
+                    }
+                    if mods.swinging_movement != default_mod.swinging_movement {
+                        ui.label(
+                            None,
+                            &format!(
+                                "Swinging Movement: {}",
+                                speed_fmt(mods.swinging_movement)
+                            ),
+                        );
+                    }
+                });
+            },
+        );
     }
 
     fn xp_needed(&self) -> u32 {
@@ -1515,6 +1633,7 @@ impl Levels {
         if self.xp >= self.xp_needed() {
             self.xp -= self.xp_needed();
             self.level += 1;
+            self.icon_jumping = true;
         }
     }
 }
@@ -1529,10 +1648,9 @@ fn update_hero(
     let &Game { tick, mouse_pos, .. } = &*game;
     let Game { ecs, hero_swinging, .. } = game;
 
-    let (hero_pos, hero_vel, hero_dir, hero_wep, hero_mods) = match ecs.query_one_mut::<Hero>(hero)
-    {
+    let (hero_pos, hero_vel, hero_dir, hero_wep, hero_mod) = match ecs.query_one_mut::<Hero>(hero) {
         Ok(mut hero) => {
-            let mods = hero.bag.mods();
+            let mods = hero.bag.mods() + levels.mods();
 
             hero.movement(mods, *hero_swinging);
 
@@ -1545,6 +1663,7 @@ fn update_hero(
         Err(_) => return,
     };
     game.hero_pos = hero_pos;
+    game.hero_mod = hero_mod;
 
     system!(ecs, xp,
         &Xp(good_tick) = &_
@@ -1594,7 +1713,7 @@ fn update_hero(
             hit,
             damage: 1,
             knockback: 0.2,
-            crit_chance: hero_mods.crit_chance,
+            crit_chance: hero_mod.crit_chance,
         });
         if dead {
             quests.update(game);
@@ -1604,12 +1723,12 @@ fn update_hero(
 
     if let Some(dir) = swing_dir
         .filter(|_| mid_swing)
-        .filter(|_| rand::gen_range(0.0, 1.0) < hero_mods.fireball_chance)
+        .filter(|_| rand::gen_range(0.0, 1.0) < hero_mod.fireball_chance)
     {
         knockback -= dir * 0.35;
         game.ecs.spawn((
             Art::Fireball,
-            Fireball { damage: 3, knockback: 0.2, crit_chance: hero_mods.crit_chance },
+            Fireball { damage: 3, knockback: 0.2, crit_chance: hero_mod.crit_chance },
             Phys::new()
                 .insert(Circle::hurt(0.4, Vec2::zero()))
                 .insert(Circle::push(0.1, Vec2::zero())),
@@ -1933,7 +2052,7 @@ impl NpcUi {
         let i = self.talks.values().filter(|(a, _)| *a).count();
 
         for (name, (active, talks)) in self.talks.iter_mut().filter(|(_, (a, _))| *a) {
-            let size = vec2(282.0, 400.0);
+            let size = vec2(300.0, 400.0);
             *active = draw_window(
                 hash!(name),
                 vec2(screen_width(), screen_height()) / 2.0 - size * (0.4 + 0.05 * i as f32),
@@ -1973,7 +2092,7 @@ async fn main() {
     let mut drawer = Drawer::new();
     let mut waffle = Waffle::new();
     let mut fireballs = Fireballs::new();
-    let mut levels = Levels::new();
+    let mut levels = Levels::new(&mut ecs);
     let mut physics = Physics::new();
     let mut bag_ui = BagUi::new(&mut ecs);
     let mut npc_ui = NpcUi::new();
@@ -2430,6 +2549,7 @@ async fn main() {
             keeper_of_bags.keep(&mut game.ecs);
             fireballs.update(&mut game, &mut quests);
             levels.update(&mut game);
+            levels.update_icon(&mut game, &drawer);
             wander(&mut game.ecs);
 
             update_hero(hero, &mut game, &mut quests, &mut bag_ui, &mut levels);
@@ -2455,6 +2575,7 @@ async fn main() {
         }
 
         quests.ui(&game);
+        levels.ui(&mut game);
         npc_ui.ui(&mut game);
         if let Ok(bag) = game.ecs.get_mut(hero).as_deref_mut() {
             bag_ui.ui(bag);
@@ -2471,6 +2592,7 @@ async fn main() {
 struct Game {
     ecs: hecs::World,
     hero_pos: Vec2,
+    hero_mod: HeroMod,
     /// Any stage of swinging
     hero_swinging: bool,
     /// In game coordinates
@@ -2483,6 +2605,7 @@ impl Game {
         Self {
             ecs,
             hero_pos: Vec2::zero(),
+            hero_mod: HeroMod::empty(),
             hero_swinging: false,
             tick: 0,
             mouse_pos: Vec2::zero(),
@@ -3153,17 +3276,33 @@ impl Drawer {
                     draw_circle(x, y + 0.40, 0.4000, DARKGRAY);
                     draw_circle(x, y + 0.40, 0.3055, GRAY);
                     draw_triangle(
-                        vec2(x - 0.085, y + 0.275),
-                        vec2(x + 0.085, y + 0.275),
-                        vec2(x + 0.025, y + 0.65),
-                        LIGHTGRAY,
+                        vec2(x - 0.085, y + 0.4),
+                        vec2(x + 0.085, y + 0.4),
+                        vec2(x, y + 0.4 - 0.25),
+                        DARKGRAY,
                     );
                     draw_triangle(
-                        vec2(x - 0.085, y + 0.275),
-                        vec2(x + 0.085, y + 0.275),
-                        vec2(x, y + 0.185),
+                        vec2(x - 0.085, y + 0.4),
+                        vec2(x + 0.085, y + 0.4),
+                        vec2(x, y + 0.65),
                         LIGHTGRAY,
                     );
+                }
+                Art::Book => {
+                    let w = 0.8;
+                    draw_rectangle(x - w / 2.0, y, w, w, DARKGRAY);
+                    let w = 0.6;
+                    draw_rectangle(x - w / 2.0, y + 0.1, w, w, GRAY);
+
+                    let y = y + 0.2;
+                    let (w, h, r) = (0.8 * 0.1, GOLDEN_RATIO * 0.8 * 0.1, 0.4 * 0.1);
+                    draw_circle(x, y + r, r, DARKGRAY);
+                    draw_rectangle(x - w / 2.0, y + r, w, h, DARKGRAY);
+
+                    draw_circle(x + 0.80 * 0.1, y + 2.2 * 0.1, 0.8 * 0.1, LIGHTGRAY);
+                    draw_circle(x + 0.16 * 0.1, y + 3.0 * 0.1, 1.0 * 0.1, LIGHTGRAY);
+                    draw_circle(x - 0.80 * 0.1, y + 2.5 * 0.1, 0.9 * 0.1, LIGHTGRAY);
+                    draw_circle(x - 0.16 * 0.1, y + 2.0 * 0.1, 0.8 * 0.1, LIGHTGRAY);
                 }
                 Art::Lockbox => {
                     let (w, h) = (0.8, 0.435);
@@ -3201,18 +3340,8 @@ impl Drawer {
                     let mut color = VIOLET;
                     color.0[3] = 85;
                     let o = (x + y + tick as f32 / 10.0).sin() * 0.08;
-                    draw_circle(
-                        x,
-                        y + 0.05 + o,
-                        0.1,
-                        color,
-                    );
-                    draw_circle(
-                        x,
-                        y + 0.05 + o * 1.1,
-                        0.05,
-                        color,
-                    );
+                    draw_circle(x, y + 0.05 + o, 0.1, color);
+                    draw_circle(x, y + 0.05 + o * 1.1, 0.05, color);
                 }
                 Art::Fireball => {
                     push_model_matrix();
