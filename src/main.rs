@@ -5,6 +5,7 @@ use macroquad::prelude::*;
 
 #[allow(dead_code)]
 mod math;
+use smallvec::{smallvec, SmallVec};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use megaui_macroquad::{
@@ -158,7 +159,7 @@ impl Phys {
 }
 
 #[derive(Debug, Default, Clone)]
-struct Contacts(smallvec::SmallVec<[Hit; 5]>);
+struct Contacts(SmallVec<[Hit; 5]>);
 #[derive(Debug, Clone, Copy)]
 struct Hit {
     normal: Vec2,
@@ -420,7 +421,7 @@ impl Bag {
     }
 
     fn mods(&self) -> HeroMod {
-        self.trinkets.iter().filter_map(|t| *t).fold(HeroMod::default(), |a, t| a + t.mods())
+        self.trinkets.iter().filter_map(|t| *t).map(|t| t.mods()).sum()
     }
 }
 
@@ -438,6 +439,7 @@ enum SlotHandle {
 }
 
 struct BagUi {
+    new_items: Vec<Item>,
     moves: Vec<ItemMove>,
     stomach: Vec<Consumable>,
 
@@ -455,6 +457,7 @@ impl BagUi {
     fn new(ecs: &mut hecs::World) -> Self {
         Self {
             moves: Vec::with_capacity(100),
+            new_items: Vec::with_capacity(100),
             stomach: Vec::with_capacity(100),
             handle_bank: std::iter::once(SlotHandle::Weapon)
                 .chain((0..BAG_SLOTS).map(|i| SlotHandle::Loose(i)))
@@ -533,6 +536,10 @@ impl BagUi {
         if bag.new_item {
             self.icon_jumping = true;
             bag.new_item = false;
+        }
+
+        for item in self.new_items.drain(..) {
+            bag.take(item);
         }
 
         if !self.window_open {
@@ -757,16 +764,50 @@ impl KeeperOfBags {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum WeaponKind {
+    Sword,
+    Bow,
+}
+impl WeaponKind {
+    fn hand_offset(self) -> f32 {
+        match self {
+            WeaponKind::Sword => 0.0,
+            WeaponKind::Bow => -0.75,
+        }
+    }
+
+    fn bullet(self, pos: Vec2, dir: Vec2) -> Option<Bullet> {
+        match self {
+            WeaponKind::Bow => Some(Bullet {
+                pos: pos + dir * 1.2,
+                art: Art::Fireball,
+                dmg: BulletDamage { damage: 3, knockback: 0.2, crit_chance: 0.01 },
+                phy: Phys::new()
+                    .insert(Circle::hurt(0.4, Vec2::zero()))
+                    .insert(Circle::push(0.1, Vec2::zero())),
+                vel: Velocity(dir / 4.0),
+                min_vel: MinVelocity(dir / 12.0),
+                rot: Rot(Rot::from_vec2(dir).0 + PI),
+                contacts: Contacts::default(),
+            }),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct WeaponState {
     last_rot: Rot,
+    kind: WeaponKind,
     owner: hecs::Entity,
     attack: Attack,
-    ents_hit: smallvec::SmallVec<[hecs::Entity; 5]>,
+    ents_hit: SmallVec<[hecs::Entity; 5]>,
 }
 impl WeaponState {
-    fn new(owner: hecs::Entity) -> Self {
+    fn new(kind: WeaponKind, owner: hecs::Entity) -> Self {
         Self {
+            kind,
             owner,
             last_rot: Default::default(),
             attack: Default::default(),
@@ -795,6 +836,7 @@ impl Default for Attack {
 #[derive(Debug, Clone, Copy)]
 struct SwingState {
     doing_damage: bool,
+    fired: bool,
     attack_kind: AttackKind,
     start_tick: u32,
     end_tick: u32,
@@ -805,12 +847,14 @@ struct SwingState {
 enum AttackKind {
     Swipe,
     Stab,
+    Shoot,
 }
 impl AttackKind {
     fn duration(self) -> u32 {
         match self {
             AttackKind::Swipe => 50,
             AttackKind::Stab => 30,
+            AttackKind::Shoot => 85,
         }
     }
 }
@@ -822,6 +866,7 @@ struct WeaponInput {
     wielder_vel: Vec2,
     wielder_pos: Vec2,
     wielder_dir: Direction,
+    speed_multiplier: f32,
     target: Vec2,
 }
 
@@ -831,6 +876,7 @@ struct Weapon<'a> {
     rot: &'a mut Rot,
     wep: &'a mut WeaponState,
     phy: &'a mut Phys,
+    art: &'a mut Art,
     contacts: &'a Contacts,
 }
 impl Weapon<'_> {
@@ -875,7 +921,15 @@ impl Weapon<'_> {
         }
     }
 
-    fn attack_hits(&mut self) -> smallvec::SmallVec<[WeaponHit; 5]> {
+    fn swing_ends(&self) -> Option<u32> {
+        if let Attack::Swing(SwingState { end_tick, .. }) = self.wep.attack {
+            Some(end_tick)
+        } else {
+            None
+        }
+    }
+
+    fn attack_hits(&mut self) -> SmallVec<[WeaponHit; 5]> {
         match self.wep.attack {
             Attack::Swing(s) if s.doing_damage => self
                 .contacts
@@ -896,20 +950,35 @@ impl Weapon<'_> {
         }
     }
 
+    fn bullet(&mut self) -> Option<Bullet> {
+        match &mut self.wep.attack {
+            Attack::Swing(s) if s.doing_damage && !s.fired => {
+                s.fired = true;
+                self.wep.kind.bullet(*self.pos, s.toward)
+            }
+            _ => None,
+        }
+    }
+
     fn rest(
         &mut self,
         WeaponInput { wielder_pos, wielder_vel, wielder_dir, tick, .. }: WeaponInput,
     ) -> (Rot, Vec2) {
-        let dir = wielder_dir.signum();
+        let dir = match self.wep.kind {
+            WeaponKind::Sword => wielder_dir.signum(),
+            WeaponKind::Bow => 1.0,
+        };
+
         let vl = wielder_vel.length();
         let drag = vl.min(0.07);
         let breathe = (tick as f32 / 35.0).sin() / 30.0;
         let jog = (tick as f32 / 6.85).sin() * vl.min(0.175);
+        let hand = self.wep.kind.hand_offset() * -dir;
         (
             Rot((FRAC_PI_2 + breathe + jog) * -dir),
             wielder_pos
                 + vec2(
-                    0.55 * -dir + breathe / 3.2 + jog * 1.5 * -dir + drag * -dir,
+                    0.55 * -dir + breathe / 3.2 + jog * 1.5 * -dir + drag * -dir + hand,
                     0.35 + (breathe + jog) / 2.8 + drag * 0.5,
                 ),
         )
@@ -922,9 +991,12 @@ impl Weapon<'_> {
         self.wep.attack = match (start_attacking, self.wep.attack) {
             (Some(attack_kind), Ready) => {
                 self.wep.ents_hit.clear();
+                let dur = attack_kind.duration() as f32;
                 Swing(SwingState {
                     start_tick: tick,
-                    end_tick: tick + attack_kind.duration(),
+                    fired: false,
+                    end_tick: tick
+                        + (dur + (dur as f32 * (1.0 - input.speed_multiplier)).round()) as u32,
                     attack_kind,
                     toward: self.from_center(wielder_pos, target),
                     doing_damage: false,
@@ -963,7 +1035,10 @@ impl Weapon<'_> {
 
         const SWING_WIDTH: f32 = 2.0;
         let swing = SWING_WIDTH / 4.0 * dir;
-        let hand_pos = center + toward / 2.0;
+        let hand_pos = match attack_kind {
+            AttackKind::Shoot => center + toward * 0.65,
+            _ => center + toward / 2.0,
+        };
         #[rustfmt::skip]
         let frames = match attack_kind {
             AttackKind::Swipe => [
@@ -979,7 +1054,14 @@ impl Weapon<'_> {
                 (1.00, None             , Some(hand_pos + toward * 1.2), true ), // stab   
                 (2.50, None             , Some(hand_pos               ), false), // recovery
                 (2.50, Some(start_rot.0), Some(start_pos              ), false), // return  
-            ]
+            ],
+            AttackKind::Shoot => [
+                (5.00, Some(rot + FRAC_PI_2), Some(hand_pos               ), false), // ready   
+                (5.00, None                 , Some(hand_pos - toward * 0.2), false), // back up 
+                (1.00, None                 , Some(hand_pos - toward * 0.6), true ), // shoot   
+                (2.50, None                 , Some(hand_pos               ), false), // recovery
+                (5.00, Some(start_rot.0)    , Some(start_pos              ), false), // return  
+            ],
         };
 
         let (st, et, t) = (start_tick as f32, end_tick as f32, tick as f32);
@@ -1011,6 +1093,14 @@ impl Weapon<'_> {
             }
 
             last_tick = tick;
+        }
+
+        if let WeaponKind::Bow = self.wep.kind {
+            *self.art = Art::Bow(if start_tick + 50 > tick {
+                (tick - start_tick) as f32 / 50.0
+            } else {
+                0.0
+            });
         }
 
         do_damage
@@ -1050,7 +1140,7 @@ struct Hero<'a> {
     hp: &'a mut Health,
 }
 impl Hero<'_> {
-    fn movement(&mut self, mods: HeroMod, hero_swinging: bool) {
+    fn movement(&mut self, mods: HeroMod, hero_swinging: bool) -> bool {
         #[rustfmt::skip]
         let keymap = [
             (KeyCode::W,  Vec2::unit_y()),
@@ -1065,7 +1155,8 @@ impl Hero<'_> {
             .fold(Vec2::zero(), |acc, (_, vec)| acc + *vec)
             .normalize();
 
-        if move_vec.length_squared() > 0.0 {
+        let moving = move_vec.length_squared() > 0.0;
+        if moving {
             self.vel.0 += move_vec
                 * if hero_swinging { mods.swinging_movement } else { 1.0 }
                 * if self.bag.weapon.is_none()
@@ -1085,6 +1176,8 @@ impl Hero<'_> {
                 *self.dir = Direction::Right;
             }
         }
+
+        moving
     }
 
     fn consume(&mut self, consumable: Consumable) {
@@ -1102,6 +1195,8 @@ enum Art {
     Consumable(Consumable),
     Trinket(Trinket),
     Fireball,
+    Harp,
+    Bow(f32),
     Xp,
     Compass,
     Scarecrow,
@@ -1111,6 +1206,7 @@ enum Art {
     Book,
     TripletuftedTerrorworm,
     VioletVagabond,
+    Goblin,
     Tree,
     Npc,
     Sword,
@@ -1120,6 +1216,7 @@ impl Art {
     fn z_offset(self) -> f32 {
         match self {
             Art::Sword => -0.5,
+            Art::Bow(_) => -0.5,
             _ => 0.0,
         }
     }
@@ -1132,8 +1229,11 @@ impl Art {
             Art::Fireball => "Fireball",
             Art::Xp => "Xp",
             Art::Scarecrow => "Scarecrow",
+            Art::Goblin => "Goblin",
             Art::Arrow => "Arrow",
             Art::Chest => "Chest",
+            Art::Harp => "Harp",
+            Art::Bow(_) => "Bow",
             Art::Lockbox => "Lockbox",
             Art::Book => "Grey Book",
             Art::Compass => "Compass",
@@ -1149,12 +1249,14 @@ impl Art {
     fn bounding(self) -> f32 {
         match self {
             Art::Book | Art::Arrow | Art::Chest | Art::Npc | Art::Sword => GOLDEN_RATIO / 2.0,
-            Art::Hero => 0.5,
-            Art::Lockbox => 0.5,
+            Art::Lockbox | Art::Compass | Art::Fireball | Art::Hero => 0.5,
             Art::Xp => 0.05,
-            Art::Compass => 0.5,
-            Art::TripletuftedTerrorworm | Art::VioletVagabond | Art::Scarecrow => 0.4,
-            Art::Fireball => 0.5,
+            Art::TripletuftedTerrorworm
+            | Art::VioletVagabond
+            | Art::Scarecrow
+            | Art::Harp
+            | Art::Bow(_) => 0.4,
+            Art::Goblin => 0.3,
             Art::Tree => 2.0,
             Art::Post => 1.05,
             Art::Trinket(_) | Art::Consumable(_) => 0.0,
@@ -1260,8 +1362,14 @@ struct HeroMod {
     swinging_movement: f32,
     forward_movement: f32,
     backward_movement: f32,
+
     crit_chance: f32,
     fireball_chance: f32,
+
+    moving_attack_speed: f32,
+
+    max_hp: u32,
+    combo_attack_hp: u32,
 }
 impl HeroMod {
     fn empty() -> Self {
@@ -1271,6 +1379,9 @@ impl HeroMod {
             backward_movement: 0.0,
             crit_chance: 0.0,
             fireball_chance: 0.0,
+            moving_attack_speed: 0.0,
+            max_hp: 0,
+            combo_attack_hp: 0,
         }
     }
 }
@@ -1284,7 +1395,15 @@ impl std::ops::Add<HeroMod> for HeroMod {
             backward_movement: self.backward_movement + othr.backward_movement,
             crit_chance: self.crit_chance + othr.crit_chance,
             fireball_chance: self.fireball_chance + othr.fireball_chance,
+            moving_attack_speed: self.moving_attack_speed + othr.moving_attack_speed,
+            max_hp: self.max_hp + othr.max_hp,
+            combo_attack_hp: self.combo_attack_hp + othr.combo_attack_hp,
         }
+    }
+}
+impl std::iter::Sum for HeroMod {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(HeroMod::empty(), std::ops::Add::add)
     }
 }
 
@@ -1296,6 +1415,9 @@ impl Default for HeroMod {
             backward_movement: 1.0,
             crit_chance: 0.01,
             fireball_chance: 0.0,
+            moving_attack_speed: 1.0,
+            max_hp: 10,
+            combo_attack_hp: 0,
         }
     }
 }
@@ -1359,7 +1481,18 @@ impl Item {
                 Circle::hurt(0.15, vec2(0.0, 0.85)),
                 Circle::hurt(0.125, vec2(0.0, 0.65)),
             ]),
-            wep: WeaponState::new(owner),
+            wep: WeaponState::new(WeaponKind::Sword, owner),
+            contacts: Contacts::default(),
+        })
+    }
+
+    fn bow(owner: hecs::Entity) -> Self {
+        Item::Weapon(WeaponItem {
+            pos: Vec2::zero(),
+            art: Art::Bow(0.0),
+            rot: Rot(0.0),
+            phys: Phys::new(),
+            wep: WeaponState::new(WeaponKind::Bow, owner),
             contacts: Contacts::default(),
         })
     }
@@ -1424,23 +1557,35 @@ fn circle_points(n: usize) -> impl Iterator<Item = Vec2> {
     (0..n).map(move |i| Rot((i as f32 / n as f32) * TAU).vec2())
 }
 
+#[derive(hecs::Bundle)]
+struct Bullet {
+    art: Art,
+    dmg: BulletDamage,
+    phy: Phys,
+    vel: Velocity,
+    min_vel: MinVelocity,
+    pos: Vec2,
+    rot: Rot,
+    contacts: Contacts,
+}
+
 #[derive(Copy, Clone)]
-struct Fireball {
+struct BulletDamage {
     damage: u32,
     knockback: f32,
     crit_chance: f32,
 }
 
-struct FireballHit {
+struct BulletHit {
     fireball_ent: hecs::Entity,
-    fireball: Fireball,
+    fireball: BulletDamage,
     hit: hecs::Entity,
     pos: Vec2,
 }
-struct Fireballs {
-    dead: Vec<FireballHit>,
+struct Bullets {
+    dead: Vec<BulletHit>,
 }
-impl Fireballs {
+impl Bullets {
     fn new() -> Self {
         Self { dead: Vec::with_capacity(100) }
     }
@@ -1451,14 +1596,14 @@ impl Fireballs {
         system!(ecs, ent,
             Contacts(hits) = &mut _
             &pos           = &Vec2
-            &fireball      = &Fireball
+            &fireball      = &BulletDamage
         {
             if let Some(Hit { hit, .. }) = hits.pop() {
-                self.dead.push(FireballHit { fireball_ent: ent, fireball, hit, pos });
+                self.dead.push(BulletHit { fireball_ent: ent, fireball, hit, pos });
             }
         });
 
-        for FireballHit { fireball_ent, fireball, hit, pos } in self.dead.drain(..) {
+        for BulletHit { fireball_ent, fireball, hit, pos } in self.dead.drain(..) {
             let (dead, _) = game.hit(HitInput {
                 hitter_pos: pos,
                 hit: WeaponHit { hit },
@@ -1475,24 +1620,90 @@ impl Fireballs {
     }
 }
 
+struct Node {
+    pos: Vec2,
+    text: String,
+    desc: String,
+    mods: HeroMod,
+    unlocks: Vec<usize>,
+    bought: bool,
+}
+impl Default for Node {
+    fn default() -> Self {
+        Self {
+            pos: vec2(0.0, 0.0),
+            text: "Default Node".to_string(),
+            desc: "Default Description".to_string(),
+            mods: HeroMod::empty(),
+            unlocks: vec![],
+            bought: false,
+        }
+    }
+}
+
 struct Levels {
+    nodes: Vec<Node>,
     dead_xp: Vec<hecs::Entity>,
     level: u32,
     xp: u32,
     icon_ent: hecs::Entity,
     window_open: bool,
     icon_jumping: bool,
+    selected_node: usize,
+    jump_to_tab: Option<usize>,
 }
 impl Levels {
     fn new(ecs: &mut hecs::World) -> Self {
-        Self {
+        let mut s = Self {
             dead_xp: Vec::with_capacity(100),
-            level: 0,
+            nodes: vec![],
+            level: 1,
             xp: 0,
             icon_ent: ecs.spawn((vec2(3.0, 0.0), Art::Book, ZOffset(-999.0))),
             window_open: false,
             icon_jumping: false,
-        }
+            selected_node: 0,
+            jump_to_tab: None,
+        };
+
+        let combinatorial_vampirism = s.add_node(Node {
+            pos: vec2(95.0, 85.0),
+            text: "Combinatorial Vampirism".to_string(),
+            desc: concat!(
+                "Earn 1 HP each time you hit \n",
+                "more than one enemy with a \n",
+                "single attack",
+            )
+            .to_string(),
+            mods: HeroMod { combo_attack_hp: 1, ..HeroMod::empty() },
+            ..Default::default()
+        });
+
+        s.add_node(Node {
+            pos: vec2(15.0, 85.0),
+            text: "Leafy Greens".to_string(),
+            desc: "Adds 2 points to your max HP".to_string(),
+            mods: HeroMod { max_hp: 2, ..HeroMod::empty() },
+            unlocks: vec![combinatorial_vampirism],
+            ..Default::default()
+        });
+
+        s.add_node(Node {
+            pos: vec2(15.0, 15.0),
+            text: "Batter Up!".to_string(),
+            desc: "Attack 5% faster while moving".to_string(),
+            mods: HeroMod { moving_attack_speed: 0.05, ..HeroMod::empty() },
+            ..Default::default()
+        });
+
+        s.selected_node = s.nodes.len() - 1;
+        s
+    }
+
+    fn add_node(&mut self, n: Node) -> usize {
+        let id = self.nodes.len();
+        self.nodes.push(n);
+        id
     }
 
     fn update_icon(&mut self, g: &mut Game, drawer: &Drawer) {
@@ -1511,14 +1722,58 @@ impl Levels {
     }
 
     fn size() -> Vec2 {
-        vec2(500.0, 250.0)
+        vec2(500.0, 265.0)
     }
 
     fn mods(&self) -> HeroMod {
-        HeroMod::empty()
+        self.nodes.iter().filter(|t| t.bought).map(|t| t.mods).sum()
     }
 
-    fn ui(&mut self, game: &mut Game) {
+    fn points_to_spend(&self) -> u32 {
+        self.level - self.nodes.iter().filter(|n| n.bought).count() as u32
+    }
+
+    fn mod_info(&mut self, ui: &mut megaui::Ui, mods: HeroMod) {
+        fn speed_fmt(amt: f32) -> String {
+            let relative = amt - 1.0;
+            if relative < 0.0 {
+                format!("{:.2}% slower", relative * 100.0)
+            } else {
+                format!("{:.2}% faster", relative * 100.0)
+            }
+        }
+
+        let default_mod = HeroMod::default();
+
+        ui.separator();
+        ui.label(None, &format!("   Level {}: {} / {}", self.level, self.xp, self.xp_needed()));
+        ui.separator();
+        ui.label(None, "     Attack Boosts");
+        ui.label(None, &format!("Critical Hit Chance: {:.2}%", mods.crit_chance * 100.0));
+        if mods.fireball_chance != default_mod.fireball_chance {
+            ui.label(None, &format!("Fireball Chance: {:.2}%", mods.fireball_chance * 100.0));
+        }
+        if mods.moving_attack_speed != default_mod.moving_attack_speed {
+            ui.label(
+                None,
+                &format!("Moving Attack Speed: {}", speed_fmt(mods.moving_attack_speed)),
+            );
+        }
+
+        ui.separator();
+        ui.label(None, "     Movement");
+        if mods.forward_movement != default_mod.forward_movement {
+            ui.label(None, &format!("Forward Movement: {}", speed_fmt(mods.forward_movement)));
+        }
+        if mods.backward_movement != default_mod.backward_movement {
+            ui.label(None, &format!("Backward Movement: {}", speed_fmt(mods.backward_movement)));
+        }
+        if mods.swinging_movement != default_mod.swinging_movement {
+            ui.label(None, &format!("Swinging Movement: {}", speed_fmt(mods.swinging_movement)));
+        }
+    }
+
+    fn ui(&mut self, g: &mut Game) {
         use megaui_macroquad::{
             draw_window,
             megaui::{
@@ -1535,15 +1790,7 @@ impl Levels {
         self.icon_jumping = false;
 
         let size = Self::size();
-
-        fn speed_fmt(amt: f32) -> String {
-            let relative = amt - 1.0;
-            if relative < 0.0 {
-                format!("{:.2}% slower", relative * 100.0)
-            } else {
-                format!("{:.2}% faster", relative * 100.0)
-            }
-        }
+        let mut tab = 0;
 
         self.window_open = draw_window(
             hash!(),
@@ -1553,65 +1800,97 @@ impl Levels {
             |ui| {
                 let pane = Vector2::new(size.x() * 0.5, size.y() - 25.0);
                 Group::new(hash!(), pane).position(Vector2::new(5.0, 5.0)).ui(ui, |ui| {
-                    let default_mod = HeroMod::default();
-                    let mods = game.hero_mod;
+                    tab = {
+                        Tabbar::new(
+                            hash!(),
+                            Vector2::new(0.0, 0.0),
+                            Vector2::new(pane.x, 25.0),
+                            &["Stat Totals", "Skill Tree Node"],
+                        )
+                        .selected_tab(self.jump_to_tab.take())
+                        .ui(ui)
+                    };
 
-                    ui.label(
-                        None,
-                        &format!("   Level {}: {} / {}", self.level, self.xp, self.xp_needed()),
-                    );
-                    ui.separator();
-                    ui.label(None, "     Attack Boosts");
-                    ui.label(None, &format!("Critical Hit Chance: {:.2}%", mods.crit_chance * 100.0));
-                    if mods.fireball_chance != default_mod.fireball_chance {
-                        ui.label(
-                            None,
-                            &format!("Fireball Chance: {:.2}%", mods.fireball_chance * 100.0),
-                        );
-                    }
+                    Group::new(hash!(), Vector2::new(pane.x, pane.y - 25.0))
+                        .position(Vector2::new(0.0, 24.0))
+                        .ui(ui, |ui| match tab {
+                            0 => self.mod_info(ui, g.hero_mod),
+                            1 => {
+                                let unlock_first = self
+                                    .nodes
+                                    .iter()
+                                    .filter(|n| n.unlocks.contains(&self.selected_node))
+                                    .fold(Some(String::new()), |acc, n| match acc {
+                                        None => None,
+                                        Some(_) if n.bought => None,
+                                        Some(t) if t.is_empty() => Some(n.text.clone()),
+                                        Some(t) => Some(format!("{} or {}", t, n.text)),
+                                    })
+                                    .filter(|t| !t.is_empty());
+                                let points_to_spend = self.points_to_spend();
+                                let Node { text, desc, bought, .. } =
+                                    &mut self.nodes[self.selected_node];
+                                ui.separator();
+                                ui.label(None, &format!("    {}", text));
+                                ui.separator();
+                                paragraph(ui, desc);
 
-                    ui.separator();
-                    ui.label(None, "     Movement");
-                    if mods.forward_movement != default_mod.forward_movement {
-                        ui.label(
-                            None,
-                            &format!(
-                                "Forward Movement: {}",
-                                speed_fmt(mods.forward_movement)
-                            ),
-                        );
-                    }
-                    if mods.backward_movement != default_mod.backward_movement {
-                        ui.label(
-                            None,
-                            &format!(
-                                "Backward Movement: {}",
-                                speed_fmt(mods.backward_movement)
-                            ),
-                        );
-                    }
-                    if mods.swinging_movement != default_mod.swinging_movement {
-                        ui.label(
-                            None,
-                            &format!(
-                                "Swinging Movement: {}",
-                                speed_fmt(mods.swinging_movement)
-                            ),
-                        );
-                    }
+                                ui.separator();
+
+                                if unlock_first.is_none() && !*bought && points_to_spend > 0 {
+                                    if ui.button(None, "Unlock") {
+                                        *bought = true;
+                                    }
+                                } else if *bought {
+                                    ui.label(None, "Unlocked!");
+                                } else if let Some(first) = unlock_first {
+                                    ui.label(None, &format!("Must unlock {} first.", first));
+                                } else {
+                                    ui.label(None, "Level up more!");
+                                }
+                            }
+                            _ => unreachable!(),
+                        });
                 });
+                Group::new(hash!(), Vector2::new(pane.x - 5.0, pane.y))
+                    .position(Vector2::new(pane.x + 5.0, 5.0))
+                    .ui(ui, |ui| {
+                        for (i, &Node { bought, pos, ref text, ref unlocks, .. }) in
+                            self.nodes.iter().enumerate()
+                        {
+                            let bob = if tab == 1 && self.selected_node == i {
+                                (g.tick as f32 / 10.0).sin() * 4.0
+                            } else {
+                                0.0
+                            };
+                            Group::new(hash!("skill tree node", text), Vector2::new(50.0, 50.0))
+                                .highlight(bought)
+                                .position(Vector2::new(pos.x(), pos.y() + bob))
+                                .ui(ui, |ui| ui.label(None, text));
+
+                            if ui.last_item_clicked() {
+                                self.selected_node = i;
+                                self.jump_to_tab = Some(1);
+                            }
+
+                            if !unlocks.is_empty() {
+                                Group::new(hash!("line", text), Vector2::new(30.0, 1.0))
+                                    .highlight(bought)
+                                    .position(Vector2::new(pos.x() + 50.0, pos.y() + 25.0))
+                                    .ui(ui, |_| {});
+                            }
+                        }
+                    });
             },
         );
     }
 
     fn xp_needed(&self) -> u32 {
         match self.level {
-            0 => 5,
-            1 => 25,
-            2 => 125,
-            3 => 250,
-            4 => 1000,
-            _ => 2500,
+            1 => 125,
+            2 => 500,
+            3 => 2500,
+            _ => 3000,
         }
     }
 
@@ -1648,20 +1927,29 @@ fn update_hero(
     let &Game { tick, mouse_pos, .. } = &*game;
     let Game { ecs, hero_swinging, .. } = game;
 
-    let (hero_pos, hero_vel, hero_dir, hero_wep, hero_mod) = match ecs.query_one_mut::<Hero>(hero) {
-        Ok(mut hero) => {
-            let mods = hero.bag.mods() + levels.mods();
+    let (hero_pos, hero_vel, hero_dir, hero_wep, hero_mod, hero_moving) =
+        match ecs.query_one_mut::<Hero>(hero) {
+            Ok(mut hero) => {
+                let mods = HeroMod::default() + hero.bag.mods() + levels.mods();
+                hero.hp.1 = mods.max_hp;
 
-            hero.movement(mods, *hero_swinging);
+                let hero_moving = hero.movement(mods, *hero_swinging);
 
-            for consumable in bag_ui.stomach.drain(..) {
-                hero.consume(consumable);
+                for consumable in bag_ui.stomach.drain(..) {
+                    hero.consume(consumable);
+                }
+
+                (
+                    *hero.pos,
+                    hero.vel.0,
+                    *hero.dir,
+                    hero.bag.weapon.as_mut().and_then(|w| w.out()),
+                    mods,
+                    hero_moving,
+                )
             }
-
-            (*hero.pos, hero.vel.0, *hero.dir, hero.bag.weapon.as_mut().and_then(|w| w.out()), mods)
-        }
-        Err(_) => return,
-    };
+            Err(_) => return,
+        };
     game.hero_pos = hero_pos;
     game.hero_mod = hero_mod;
 
@@ -1688,24 +1976,70 @@ fn update_hero(
 
     let mut swing_dir = None;
     let mut mid_swing = false;
-    let hero_attacks = hero_wep
+    let mut swing_ends = None;
+    let (hero_attacks, hero_bullet) = hero_wep
         .and_then(|e| ecs.query_one_mut::<Weapon>(e).ok())
         .map(|mut wep| {
+            let attack_kind = match wep.wep.kind {
+                WeaponKind::Sword => AttackKind::Swipe,
+                WeaponKind::Bow => AttackKind::Shoot,
+            };
             wep.tick(WeaponInput {
-                start_attacking: Some(AttackKind::Swipe)
+                start_attacking: Some(attack_kind)
                     .filter(|_| !mouse_over_ui() && is_mouse_button_down(MouseButton::Left)),
                 target: mouse_pos,
                 wielder_pos: hero_pos,
                 wielder_vel: hero_vel,
                 wielder_dir: hero_dir,
+                speed_multiplier: if hero_moving { hero_mod.moving_attack_speed } else { 1.0 },
                 tick,
             });
             mid_swing = wep.mid_swing(tick);
             swing_dir = wep.swing_dir();
             *hero_swinging = wep.swing_dir().is_some();
-            wep.attack_hits()
+
+            swing_ends = wep.swing_ends();
+
+            (wep.attack_hits(), wep.bullet())
         })
         .unwrap_or_default();
+
+    for &WeaponHit { hit } in hero_attacks.iter() {
+        if let Some(end_tick) = swing_ends {
+            if ecs.get::<Fighter>(hit).is_ok() {
+                if let Some(Combo { fighters_hit, .. }) = &mut game.combo {
+                    *fighters_hit += 1;
+                } else {
+                    game.combo = Some(Combo { fighters_hit: 1, end_tick, hp_awarded: false });
+                }
+            }
+        }
+    }
+
+    if let Some(Combo { end_tick, .. }) = game.combo {
+        if tick > end_tick {
+            game.combo = None;
+        }
+    }
+
+    if let Some(Combo { hp_awarded, .. }) = game.combo.as_mut().filter(|c| c.fighters_hit > 1) {
+        if !*hp_awarded {
+            *hp_awarded = true;
+
+            let add_hp = hero_mod.combo_attack_hp;
+            let added = ecs
+                .get_mut::<Health>(hero)
+                .map(|mut hp| {
+                    hp.0 += add_hp;
+                    add_hp > 0
+                })
+                .unwrap_or(false);
+
+            if added {
+                ecs.spawn((DamageLabel { tick, hp: (add_hp as i32), pos: hero_pos },));
+            }
+        }
+    }
 
     let mut knockback = hero_attacks.iter().fold(Vec2::zero(), |acc, &hit| {
         let (dead, vel) = game.hit(HitInput {
@@ -1721,23 +2055,25 @@ fn update_hero(
         acc + vel
     });
 
-    if let Some(dir) = swing_dir
+    if let Some(bullet) = swing_dir
         .filter(|_| mid_swing)
         .filter(|_| rand::gen_range(0.0, 1.0) < hero_mod.fireball_chance)
-    {
-        knockback -= dir * 0.35;
-        game.ecs.spawn((
-            Art::Fireball,
-            Fireball { damage: 3, knockback: 0.2, crit_chance: hero_mod.crit_chance },
-            Phys::new()
+        .map(|dir| Bullet {
+            pos: hero_pos + dir * 2.0 + vec2(0.0, 0.5),
+            art: Art::Fireball,
+            dmg: BulletDamage { damage: 3, knockback: 0.2, crit_chance: hero_mod.crit_chance },
+            phy: Phys::new()
                 .insert(Circle::hurt(0.4, Vec2::zero()))
                 .insert(Circle::push(0.1, Vec2::zero())),
-            Velocity(dir / 6.0),
-            MinVelocity(dir / 15.0),
-            hero_pos + dir * 2.0 + vec2(0.0, 0.5),
-            Rot(Rot::from_vec2(dir).0 + PI),
-            Contacts::default(),
-        ));
+            vel: Velocity(dir / 6.0),
+            min_vel: MinVelocity(dir / 15.0),
+            rot: Rot(Rot::from_vec2(dir).0 + PI),
+            contacts: Contacts::default(),
+        })
+        .or(hero_bullet)
+    {
+        knockback += bullet.rot.vec2() * 0.35;
+        game.ecs.spawn(bullet);
     }
 
     if let Ok(mut v) = game.ecs.get_mut::<Velocity>(hero) {
@@ -1749,13 +2085,23 @@ fn update_hero(
 enum FighterBehavior {
     SwingAlways,
     LowHealthStab,
+    Ranged,
 }
 impl FighterBehavior {
     fn attack_kind(self, hp: Health) -> AttackKind {
         use {AttackKind::*, FighterBehavior::*};
         match self {
+            Ranged => Shoot,
             LowHealthStab if hp.ratio() < 0.5 => Stab,
             _ => Swipe,
+        }
+    }
+
+    fn chase_speed(self) -> f32 {
+        use FighterBehavior::*;
+        match self {
+            Ranged => 0.0,
+            _ => 1.0,
         }
     }
 }
@@ -1767,6 +2113,8 @@ struct Fighter {
     chase_speed: f32,
     charge_speed: f32,
     attack_interval: u32,
+    chase_distance: f32,
+    aggro_distance: f32,
 }
 impl Default for Fighter {
     fn default() -> Self {
@@ -1776,6 +2124,8 @@ impl Default for Fighter {
             chase_speed: 0.0065,
             charge_speed: 0.0085,
             attack_interval: 120,
+            chase_distance: 15.0,
+            aggro_distance: 5.0,
         }
     }
 }
@@ -1817,9 +2167,9 @@ impl Waffle {
             &pos    = &Vec2
         {
             let dist = (hero_pos - pos).length();
-            fighter.aggroed = if dist < 5.0 {
+            fighter.aggroed = if dist < fighter.aggro_distance {
                 true
-            } else if dist > 15.0 {
+            } else if dist > fighter.chase_distance {
                 false
             } else {
                 fighter.aggroed
@@ -1868,35 +2218,47 @@ impl Waffle {
                         (delta, f.chase_speed)
                     };
 
-                    *vel += d.min(d.normalize()) * speed;
+                    *vel += d.normalize() * speed.min(delta.length()) * f.behavior.chase_speed();
                 }
             }
 
             if let Ok(Some(wep_ent)) =
                 game.ecs.get_mut::<Bag>(e).map(|mut b| b.weapon.as_mut().and_then(|w| w.out()))
             {
-                let attacks = game
+                let (attacks, bullet) = game
                     .ecs
                     .query_one_mut::<Weapon>(wep_ent)
                     .ok()
                     .map(|mut wep| {
                         wep.tick(WeaponInput {
-                            start_attacking: attack_kind
-                                .filter(|_| *attacker == Some(e) && *last_attack == tick),
+                            start_attacking: match f.behavior {
+                                FighterBehavior::Ranged => Some(AttackKind::Shoot),
+                                _ => attack_kind
+                                    .filter(|_| *attacker == Some(e) && *last_attack == tick),
+                            },
                             target: hero_pos,
                             wielder_pos: pos,
                             wielder_vel: vel.0,
                             wielder_dir: (hero_pos - pos).x().into(),
+                            speed_multiplier: 1.0,
                             tick,
                         });
-                        wep.attack_hits()
+                        (wep.attack_hits(), wep.bullet())
                     })
                     .unwrap_or_default();
+
+                if let Some(bullet) = bullet {
+                    if let Ok(mut v) = game.ecs.get_mut::<Velocity>(e) {
+                        v.knockback(bullet.rot.vec2(), 0.035);
+                    }
+                    game.ecs.spawn(bullet);
+                }
 
                 if let (Some(attack_kind), true) = (*attack_kind, *attacker == Some(e)) {
                     let (damage, attacker_knockback, knockback) = match attack_kind {
                         AttackKind::Swipe => (1, 0.125, 0.2),
                         AttackKind::Stab => (3, 0.085, 0.28),
+                        AttackKind::Shoot => (1, 0.145, 0.15),
                     };
                     let delta = attacks.iter().fold(Vec2::zero(), |acc, &hit| {
                         let (_, vel) = game.hit(HitInput {
@@ -1918,7 +2280,7 @@ impl Waffle {
     }
 }
 
-fn paragraph(ui: &mut megaui::Ui, para: &'static str) {
+fn paragraph<'a>(ui: &mut megaui::Ui, para: &'a str) {
     use megaui::widgets::Label;
     Label::new(para).multiline(14.0).ui(ui);
 }
@@ -1935,7 +2297,7 @@ impl RewardChoice {
         Self { id, choices, selected: None, rewarded: false }
     }
 
-    fn ui(&mut self, ui: &mut megaui::Ui) -> smallvec::SmallVec<[Item; 5]> {
+    fn ui(&mut self, ui: &mut megaui::Ui) -> SmallVec<[Item; 5]> {
         use megaui::{
             widgets::{Group, Label},
             Vector2,
@@ -1958,7 +2320,7 @@ impl RewardChoice {
                             .position(Vector2::new(5.0, 5.0))
                             .ui(ui, |ui| ui.label(None, art.name()));
 
-                        if !*rewarded && ui.button(Vector2::new(12.0, 58.0), "Take") {
+                        if !*rewarded && ui.button(Vector2::new(12.0, 58.0), "Look") {
                             *selected = Some(art);
                         }
                     });
@@ -2080,18 +2442,73 @@ impl NpcUi {
     }
 }
 
+#[derive(Copy, Clone, Debug, Default)]
+struct PickUp {
+    active: bool,
+    within_range: bool,
+}
+
+fn pickup_ui(game: &mut Game, bag_ui: &mut BagUi) {
+    use megaui::{widgets::Group, Vector2};
+    use megaui_macroquad::{draw_window, WindowParams};
+    let ecs = &mut game.ecs;
+    let hero_pos = game.hero_pos;
+
+    let mut take: Option<hecs::Entity> = None;
+    system!(ecs, e,
+        PickUp { active, within_range } = &mut _
+        &art                            = &Art
+        &pos                            = &Vec2
+    {
+        let now_within_range = (pos - hero_pos).length() < 1.3;
+        if now_within_range != *within_range {
+            *active = now_within_range;
+        }
+        *within_range = now_within_range;
+
+        if !*active { continue }
+
+        let size = vec2(100.0, 100.0);
+        *active = draw_window(
+            hash!("pickup window", e),
+            vec2(screen_width(), screen_height()) / 2.0 - size,
+            size,
+            WindowParams { label: "Ground".to_string(), close_button: true, ..Default::default() },
+            |ui| {
+                Group::new(hash!("pickup slot", e), Vector2::new(50., 50.))
+                    .position(Vector2::new(25.0, 5.0))
+                    .ui(ui, |ui| ui.label(None, art.name()));
+
+                if ui.button(Vector2::new(30.0, 62.0), "Take") {
+                    take = Some(e);
+                }
+            },
+        );
+    });
+
+    if let Some(e) = take {
+        match ecs.remove(e) {
+            Ok(item) => bag_ui.new_items.push(Item::Weapon(item)),
+            other => or_err!(other),
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 struct Xp(u32);
 
 #[derive(Copy, Clone, Debug)]
 struct SpillXp(usize);
 
+#[derive(Clone, Debug, Default)]
+struct SpillItems(SmallVec<[Item; 5]>);
+
 #[macroquad::main("rpg")]
 async fn main() {
     let mut ecs = hecs::World::new();
     let mut drawer = Drawer::new();
     let mut waffle = Waffle::new();
-    let mut fireballs = Fireballs::new();
+    let mut fireballs = Bullets::new();
     let mut levels = Levels::new(&mut ecs);
     let mut physics = Physics::new();
     let mut bag_ui = BagUi::new(&mut ecs);
@@ -2112,14 +2529,20 @@ async fn main() {
         Health::full(10),
         Bag::default(),
     ));
-    ecs.spawn((
-        vec2(0.0, 0.0),
-        Art::Chest,
-        Phys::new().wings(0.4, 0.4, CircleKind::Push).wings(0.4, 0.4, CircleKind::Hit),
-        Velocity::default(),
-        Health::full(7),
-        SpillXp(15),
-    ));
+    fn chest(ecs: &mut hecs::World, pos: Vec2, items: SmallVec<[Item; 5]>) {
+        ecs.spawn((
+            pos,
+            Art::Chest,
+            Phys::new().wings(0.4, 0.4, CircleKind::Push).wings(0.4, 0.4, CircleKind::Hit),
+            Velocity::default(),
+            Health::full(3),
+            SpillXp(15),
+            SpillItems(items),
+        ));
+    }
+    chest(&mut ecs, vec2(0.0, 0.0), smallvec![Item::bow(hero)]);
+    ecs.spawn((vec2(-1.0, 0.0), Art::Sword));
+    ecs.spawn((vec2(-2.0, 0.0), Art::Bow));
 
     type Post = (Vec2, Art, Phys);
     #[derive(Clone, Copy)]
@@ -2200,6 +2623,132 @@ async fn main() {
             Bag::holding(Item::sword(vv)),
         )
     ));
+
+    struct Goblins {
+        patrol: Vec<hecs::Entity>,
+        reserve: Vec<hecs::Entity>,
+        ranged: Vec<hecs::Entity>,
+        encampment: Vec2,
+        patrol_distance: f32,
+        aggroed: bool,
+    }
+    impl Goblins {
+        fn new(ecs: &mut hecs::World, encampment: Vec2) -> Self {
+            let patrol_distance = 10.0;
+            fn goblin(
+                ecs: &mut hecs::World,
+                p: Vec2,
+                f: impl FnOnce(hecs::Entity) -> Item,
+                behavior: FighterBehavior,
+            ) -> hecs::Entity {
+                let goblin = ecs.reserve_entity();
+                or_err!(ecs.insert(
+                    goblin,
+                    (
+                        p,
+                        Health::full(4),
+                        HealthBar,
+                        Art::Goblin,
+                        SpillXp(10),
+                        Fighter {
+                            behavior,
+                            chase_speed: 0.0045,
+                            charge_speed: 0.0065,
+                            chase_distance: 50.0,
+                            attack_interval: 60,
+                            ..Default::default()
+                        },
+                        Phys::new().insert(Circle::push(0.2, vec2(0.0, 0.1))).hitbox(0.3),
+                        Velocity::default(),
+                        Bag::holding(f(goblin)),
+                    )
+                ));
+                goblin
+            };
+
+            Self {
+                encampment,
+                aggroed: false,
+                patrol_distance,
+                patrol: circle_points(4)
+                    .map(|p| {
+                        goblin(
+                            ecs,
+                            p * patrol_distance + encampment,
+                            |e| Item::sword(e),
+                            FighterBehavior::SwingAlways,
+                        )
+                    })
+                    .collect(),
+                reserve: circle_points(3)
+                    .map(|p| {
+                        goblin(
+                            ecs,
+                            p + vec2(-3.0, 3.0) + encampment,
+                            |e| Item::sword(e),
+                            FighterBehavior::SwingAlways,
+                        )
+                    })
+                    .collect(),
+                ranged: circle_points(3)
+                    .map(|p| {
+                        goblin(
+                            ecs,
+                            p + vec2(3.0, 3.0) + encampment,
+                            |e| Item::bow(e),
+                            FighterBehavior::Ranged,
+                        )
+                    })
+                    .collect(),
+            }
+        }
+
+        fn update(&mut self, ecs: &mut hecs::World) {
+            let mut goal: Vec2 = self
+                .patrol
+                .last()
+                .and_then(|&e| ecs.get(e).ok().as_deref().copied())
+                .unwrap_or(self.encampment);
+
+            for &ent in &self.patrol {
+                if let Ok((&pos, Velocity(vel))) = ecs.query_one_mut::<(&Vec2, &mut _)>(ent) {
+                    if !self.aggroed {
+                        let camp_delta = pos - self.encampment;
+                        if camp_delta.length() < self.patrol_distance {
+                            *vel += camp_delta.normalize()
+                                * (camp_delta.length() - self.patrol_distance).abs().min(0.0045);
+                        }
+                        *vel += (goal - pos).normalize() * 0.0015;
+                        goal = pos;
+                    }
+                }
+            }
+
+            for &ent in self.reserve.iter().chain(&self.ranged).chain(&self.patrol) {
+                if let Ok(mut fighter) = ecs.get_mut::<Fighter>(ent) {
+                    self.aggroed = fighter.aggroed || self.aggroed;
+                    fighter.aggroed = fighter.aggroed || self.aggroed;
+                }
+            }
+        }
+    }
+
+    let encampment = vec2(35.5, -3.0);
+    for p in circle_points(7) {
+        tree(&mut ecs, p * 8.0 + encampment)
+    }
+    for p in circle_points(8) {
+        tree(&mut ecs, p * 15.0 + encampment)
+    }
+    let mut goblins = Goblins::new(&mut ecs, encampment);
+
+    for p in circle_points(7) {
+        chest(&mut ecs, p * 3.0 + vec2(3.0, 3.0) + encampment, smallvec![]);
+    }
+    for i in 0..3 {
+        chest(&mut ecs, encampment + vec2(2.0 + i as f32 * 1.0, i as f32 * 1.5 - 5.0), smallvec![])
+    }
+    ecs.spawn((encampment + vec2(1.8, -2.5), Art::Harp));
 
     let lair_pen = Pen::new(&mut ecs, 8.0, vec2(-40.0, 10.0), 52);
     lair_pen.gate_open(&mut ecs);
@@ -2552,6 +3101,8 @@ async fn main() {
             levels.update_icon(&mut game, &drawer);
             wander(&mut game.ecs);
 
+            goblins.update(&mut game.ecs);
+
             update_hero(hero, &mut game, &mut quests, &mut bag_ui, &mut levels);
 
             drawer.update(&mut game);
@@ -2577,6 +3128,7 @@ async fn main() {
         quests.ui(&game);
         levels.ui(&mut game);
         npc_ui.ui(&mut game);
+        pickup_ui(&mut game, &mut bag_ui);
         if let Ok(bag) = game.ecs.get_mut(hero).as_deref_mut() {
             bag_ui.ui(bag);
         }
@@ -2589,10 +3141,17 @@ async fn main() {
     }
 }
 
+struct Combo {
+    fighters_hit: usize,
+    end_tick: u32,
+    hp_awarded: bool,
+}
+
 struct Game {
     ecs: hecs::World,
     hero_pos: Vec2,
     hero_mod: HeroMod,
+    combo: Option<Combo>,
     /// Any stage of swinging
     hero_swinging: bool,
     /// In game coordinates
@@ -2606,6 +3165,7 @@ impl Game {
             ecs,
             hero_pos: Vec2::zero(),
             hero_mod: HeroMod::empty(),
+            combo: None,
             hero_swinging: false,
             tick: 0,
             mouse_pos: Vec2::zero(),
@@ -2692,6 +3252,17 @@ impl Game {
             if dead {
                 if let Some(&SpillXp(n)) = spill_xp {
                     self.xp(pos, n);
+                }
+
+                if let Ok(SpillItems(mut items)) = self.ecs.remove_one(hit) {
+                    for item in items.drain(..) {
+                        if let Item::Weapon(mut wep) = item {
+                            wep.pos = pos;
+                            wep.rot = Rot(FRAC_PI_2 + 0.1);
+                            let e = self.ecs.spawn(wep);
+                            or_err!(self.ecs.insert_one(e, PickUp::default()));
+                        }
+                    }
                 }
 
                 or_err!(self.ecs.despawn(hit));
@@ -3132,13 +3703,13 @@ impl DamageLabelBin {
 
         for (_, &DamageLabel { hp, pos, tick }) in ecs.query::<&_>().iter() {
             *text = hp.to_string();
-            let (x, y) = cam.world_to_screen(pos).into();
+            let (x, y) = cam.world_to_screen(pos + vec2(0.0, 1.35)).into();
             draw_text(
                 text,
                 x - 20.0,
-                y - 120.0 - (game_tick - tick) as f32,
+                y - (game_tick - tick) as f32,
                 42.0 * (1.0 + ((hp as f32).abs() - 1.0) / 3.0),
-                MAROON,
+                if hp < 0 { MAROON } else { GREEN },
             );
         }
     }
@@ -3213,7 +3784,10 @@ impl Drawer {
             draw_line(sx, sy, ex, ey, 3.2, Color([160, 160, 160, 255]));
         }
         draw_line(-20.0, -20.0, -40.0, 10.0, 2.2, Color([165, 165, 165, 255]));
+        draw_line(0.0, -10.0, 35.0, -3.0, 2.2, Color([165, 165, 165, 255]));
+        draw_line(0.3, -9.98, -15.0, -10.0, 2.2, Color([165, 165, 165, 255]));
         road_through(-vec2(20.0, 20.0), vec2(180.0, 420.0));
+        //road_through(vec2(-15.0, -15.0), vec2(35.5, -3.0) * 2.0);
 
         #[cfg(feature = "show-culling")]
         {
@@ -3262,7 +3836,33 @@ impl Drawer {
                 Art::Scarecrow => rect(GOLD, 0.8, 0.8),
                 Art::TripletuftedTerrorworm => rect(WHITE, 0.8, 0.8),
                 Art::VioletVagabond => rect(VIOLET, 0.8, 0.8),
+                Art::Goblin => rect(DARKGREEN, 0.6, 0.6),
                 Art::Npc => rect(GREEN, 1.0, GOLDEN_RATIO),
+                Art::Bow(r) => {
+                    push_model_matrix();
+                    draw_line(-0.1, -1.0, -0.1 - r * 0.3, 0.0, 0.035, LIGHTGRAY);
+                    draw_line(-0.1, 1.0, -0.1 - r * 0.3, 0.0, 0.035, LIGHTGRAY);
+
+                    draw_line(-0.10, -1.0, 0.03, -1.1, 0.045, BROWN);
+                    draw_line(-0.10, -1.0, 0.2, -0.4, 0.105, BROWN);
+                    draw_line(0.25, -0.1, 0.2, -0.4, 0.095, BROWN);
+                    draw_line(0.25, -0.1, 0.1, 0.0, 0.075, BROWN);
+                    draw_line(0.25, 0.1, 0.1, 0.0, 0.075, BROWN);
+                    draw_line(0.25, 0.1, 0.2, 0.4, 0.095, BROWN);
+                    draw_line(-0.10, 1.0, 0.2, 0.4, 0.105, BROWN);
+                    draw_line(-0.10, 1.0, 0.03, 1.1, 0.045, BROWN);
+                    gl.pop_model_matrix();
+                }
+                Art::Harp => {
+                    draw_line(x + 0.3, y + 0.1, x + 0.3, y + 0.6, 0.035, LIGHTGRAY);
+                    draw_line(x + 0.2, y + 0.1, x + 0.2, y + 0.5, 0.035, LIGHTGRAY);
+                    draw_line(x + 0.1, y + 0.2, x + 0.1, y + 0.5, 0.035, LIGHTGRAY);
+
+                    draw_line(x + 0.4, y, x + 0.4, y + 0.6, 0.075, GOLD);
+                    draw_line(x - 0.15, y + 0.35, x + 0.4, y, 0.1, GOLD);
+                    draw_line(x + 0.1, y + 0.5, x + 0.4, y + 0.6, 0.1, GOLD);
+                    draw_line(x + 0.1, y + 0.5, x - 0.05, y + 0.3, 0.075, GOLD);
+                }
                 Art::Chest => {
                     let (w, h) = (vec2(GOLDEN_RATIO, 1.0) * 0.8).into();
                     draw_rectangle(x - w / 2.0, y, w, h, BROWN);
@@ -3348,26 +3948,18 @@ impl Drawer {
                     let mut color = ORANGE;
                     for q in 0..10 {
                         let i = q % 5;
-                        let w = (5 - i) as f32 / 5.0 * 0.4 + 0.1;
-                        color.0[3] = 60 + 30 * ((5 - i) as u8 / 5);
-                        draw_rectangle(
-                            w / -2.0 + i as f32 / 6.0 + q as f32 / 85.0,
-                            ((tick + q * 3) as f32 / 5.0).sin() * (i as f32 / 4.5).max(0.05) * 0.65
+                        let w = (5 - i) as f32 / 5.0 * 0.1 + 0.2;
+                        color.0[1] = 120 + 70 * (i as f32 / 5.0) as u8;
+                        color.0[2] = 20 + 30 * (i as f32 / 5.0) as u8;
+                        color.0[3] = 40 + 53 * ((5 - i) as f32 / 5.0) as u8;
+                        draw_circle(
+                            w / -2.0 + i as f32 / 8.0 + q as f32 / 85.0,
+                            ((tick + q * 4) as f32 / 5.0).sin() * (i as f32 / 4.5).max(0.05) * 0.25
                                 - w / 2.0,
-                            w,
                             w,
                             color,
                         );
                     }
-                    color = RED;
-                    color.0[3] = 100;
-                    draw_rectangle(
-                        0.3 / -2.0,
-                        0.3 / -2.0 + (tick as f32 / 5.0).sin() * 0.02,
-                        0.3,
-                        0.3,
-                        color,
-                    );
                     gl.pop_model_matrix();
                 }
                 Art::Arrow => {
