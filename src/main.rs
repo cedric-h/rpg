@@ -168,8 +168,13 @@ struct Hit {
     hit: hecs::Entity,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 struct Scale(Vec2);
+impl Default for Scale {
+    fn default() -> Self {
+        Scale(vec2(1.0, 1.0))
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ZOffset(f32);
@@ -768,30 +773,137 @@ impl KeeperOfBags {
 enum WeaponKind {
     Sword,
     Bow,
+    FireWand,
 }
 impl WeaponKind {
     fn hand_offset(self) -> f32 {
         match self {
-            WeaponKind::Sword => 0.0,
             WeaponKind::Bow => -0.75,
+            _ => 0.0,
         }
     }
 
-    fn bullet(self, pos: Vec2, dir: Vec2) -> Option<Bullet> {
+    fn hand_rotation(self) -> f32 {
         match self {
-            WeaponKind::Bow => Some(Bullet {
-                pos: pos + dir * 1.2,
+            WeaponKind::Bow => FRAC_PI_2,
+            _ => 0.0,
+        }
+    }
+
+    fn attack_speed(self) -> f32 {
+        match self {
+            WeaponKind::Sword => 1.0,
+            WeaponKind::Bow => 1.0,
+            WeaponKind::FireWand => 1.25,
+        }
+    }
+
+    fn shots_per_use(self) -> usize {
+        match self {
+            WeaponKind::Sword => 0,
+            WeaponKind::Bow => 1,
+            WeaponKind::FireWand => 25,
+        }
+    }
+
+    fn bullets(self, pos: Vec2, dir: Vec2, tick: u32) -> SmallVec<[Bullet; 5]> {
+        match self {
+            WeaponKind::Bow => smallvec![BulletKind::Fireball.bullet(pos + dir * 1.2, dir, tick)],
+            WeaponKind::FireWand => (0..6).map(|_| {
+                let shaken = Rot(rand::gen_range(-1.05, 1.05)).apply(dir);
+                let mut sparkball = BulletKind::Sparkball(0.8, 1.0).bullet(pos + shaken * 2.2, shaken, tick);
+                sparkball.vel.0 *= 0.45;
+                sparkball.min_vel.0 *= 0.6;
+                sparkball.shrink_out.end_tick += 30;
+                sparkball.dmg.invincible_until_tick = tick;
+                sparkball
+            }).collect(),
+            _ => smallvec![],
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+struct Heatable {
+    active: bool,
+    heat: u8,
+    lose_heat_tick: u32,
+}
+impl Heatable {
+    fn yes() -> Self {
+        Self {
+            active: true,
+            heat: 0,
+            lose_heat_tick: 0,
+        }
+    }
+    fn no() -> Self {
+        Self {
+            active: false,
+            heat: 0,
+            lose_heat_tick: 0,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum BulletKind {
+    Fireball,
+    Sparkball(f32, f32),
+}
+impl BulletKind {
+    fn bullet(self, pos: Vec2, dir: Vec2, tick: u32) -> Bullet {
+        use BulletKind::*;
+        match self {
+            Fireball => Bullet {
+                pos,
                 art: Art::Fireball,
-                dmg: BulletDamage { damage: 3, knockback: 0.2, crit_chance: 0.01 },
+                dmg: BulletDamage {
+                    damage: 3,
+                    heats: true,
+                    target_knockback: 0.2,
+                    attacker_knockback: 0.15,
+                    crit_chance: 0.01,
+                    children: Some((12, Sparkball(0.0, 1.0))),
+                    invincible_until_tick: tick,
+                },
                 phy: Phys::new()
                     .insert(Circle::hurt(0.4, Vec2::zero()))
-                    .insert(Circle::push(0.1, Vec2::zero())),
+                    .insert(Circle::ghost_hit(0.4, Vec2::zero()))
+                    .insert(Circle::ghost_push(0.1, Vec2::zero())),
                 vel: Velocity(dir / 4.0),
                 min_vel: MinVelocity(dir / 12.0),
+                shrink_out: ShrinkOut { end_tick: tick + 150, shrink_at: tick + 125 },
+                scale: Scale::default(),
                 rot: Rot(Rot::from_vec2(dir).0 + PI),
                 contacts: Contacts::default(),
-            }),
-            _ => None,
+            },
+            Sparkball(min, max) => {
+                let dir = dir * rand::gen_range(min, max);
+                Bullet {
+                    pos,
+                    art: Art::Fireball,
+                    dmg: BulletDamage {
+                        damage: 1,
+                        heats: true,
+                        crit_chance: 0.01,
+                        target_knockback: 0.01,
+                        attacker_knockback: 0.015,
+                        children: None,
+                        invincible_until_tick: tick + 2,
+                    },
+                    phy: Phys::new()
+                        .insert(Circle::hurt(0.04, Vec2::zero()))
+                        .insert(Circle::ghost_push(0.04, Vec2::zero()))
+                        .insert(Circle::ghost_hit(0.04, Vec2::zero())),
+                    vel: Velocity(dir / 5.0),
+                    min_vel: MinVelocity(dir / 16.0),
+                    shrink_out: ShrinkOut { end_tick: tick + rand::gen_range(20, 45), shrink_at: tick },
+                    scale: Scale::default(),
+                    rot: Rot(Rot::from_vec2(dir).0 + PI),
+                    contacts: Contacts::default(),
+                }
+            }
         }
     }
 }
@@ -836,7 +948,7 @@ impl Default for Attack {
 #[derive(Debug, Clone, Copy)]
 struct SwingState {
     doing_damage: bool,
-    fired: bool,
+    times_fired: usize,
     attack_kind: AttackKind,
     start_tick: u32,
     end_tick: u32,
@@ -950,13 +1062,13 @@ impl Weapon<'_> {
         }
     }
 
-    fn bullet(&mut self) -> Option<Bullet> {
+    fn bullets(&mut self, tick: u32) -> SmallVec<[Bullet; 5]> {
         match &mut self.wep.attack {
-            Attack::Swing(s) if s.doing_damage && !s.fired => {
-                s.fired = true;
-                self.wep.kind.bullet(*self.pos, s.toward)
+            Attack::Swing(s) if s.doing_damage && s.times_fired < self.wep.kind.shots_per_use() => {
+                s.times_fired += 1;
+                self.wep.kind.bullets(*self.pos, s.toward, tick)
             }
-            _ => None,
+            _ => smallvec![],
         }
     }
 
@@ -965,8 +1077,8 @@ impl Weapon<'_> {
         WeaponInput { wielder_pos, wielder_vel, wielder_dir, tick, .. }: WeaponInput,
     ) -> (Rot, Vec2) {
         let dir = match self.wep.kind {
-            WeaponKind::Sword => wielder_dir.signum(),
             WeaponKind::Bow => 1.0,
+            _ => wielder_dir.signum(),
         };
 
         let vl = wielder_vel.length();
@@ -992,11 +1104,12 @@ impl Weapon<'_> {
             (Some(attack_kind), Ready) => {
                 self.wep.ents_hit.clear();
                 let dur = attack_kind.duration() as f32;
+                let m = input.speed_multiplier * self.wep.kind.attack_speed();
                 Swing(SwingState {
                     start_tick: tick,
-                    fired: false,
+                    times_fired: 0,
                     end_tick: tick
-                        + (dur + (dur as f32 * (1.0 - input.speed_multiplier)).round()) as u32,
+                        + (dur + (dur as f32 * (1.0 - m)).round()) as u32,
                     attack_kind,
                     toward: self.from_center(wielder_pos, target),
                     doing_damage: false,
@@ -1030,7 +1143,7 @@ impl Weapon<'_> {
         let (start_rot, start_pos) = self.rest(input);
 
         let center = self.center(wielder_pos);
-        let rot = Rot::from_vec2(toward).0 - FRAC_PI_2;
+        let rot = Rot::from_vec2(toward).0 - FRAC_PI_2 + self.wep.kind.hand_rotation();
         let dir = -toward.x().signum();
 
         const SWING_WIDTH: f32 = 2.0;
@@ -1056,11 +1169,11 @@ impl Weapon<'_> {
                 (2.50, Some(start_rot.0), Some(start_pos              ), false), // return  
             ],
             AttackKind::Shoot => [
-                (5.00, Some(rot + FRAC_PI_2), Some(hand_pos               ), false), // ready   
-                (5.00, None                 , Some(hand_pos - toward * 0.2), false), // back up 
-                (1.00, None                 , Some(hand_pos - toward * 0.6), true ), // shoot   
-                (2.50, None                 , Some(hand_pos               ), false), // recovery
-                (5.00, Some(start_rot.0)    , Some(start_pos              ), false), // return  
+                (5.00, Some(rot)        , Some(hand_pos               ), false), // ready   
+                (5.00, None             , Some(hand_pos - toward * 0.2), false), // back up 
+                (1.00, None             , Some(hand_pos - toward * 0.6), true ), // shoot   
+                (2.50, None             , Some(hand_pos               ), false), // recovery
+                (5.00, Some(start_rot.0), Some(start_pos              ), false), // return  
             ],
         };
 
@@ -1095,7 +1208,7 @@ impl Weapon<'_> {
             last_tick = tick;
         }
 
-        if let WeaponKind::Bow = self.wep.kind {
+        if let Art::Bow(_) = self.art {
             *self.art = Art::Bow(if start_tick + 50 > tick {
                 (tick - start_tick) as f32 / 50.0
             } else {
@@ -1210,12 +1323,13 @@ enum Art {
     Tree,
     Npc,
     Sword,
+    FireWand,
     Post,
 }
 impl Art {
     fn z_offset(self) -> f32 {
         match self {
-            Art::Sword => -0.5,
+            Art::Sword | Art::FireWand => -0.5,
             Art::Bow(_) => -0.5,
             _ => 0.0,
         }
@@ -1242,13 +1356,14 @@ impl Art {
             Art::Tree => "Tree",
             Art::Npc => "Npc",
             Art::Sword => "Sword",
+            Art::FireWand => "Fire Wand",
             Art::Post => "Post",
         }
     }
 
     fn bounding(self) -> f32 {
         match self {
-            Art::Book | Art::Arrow | Art::Chest | Art::Npc | Art::Sword => GOLDEN_RATIO / 2.0,
+            Art::Book | Art::Arrow | Art::Chest | Art::Npc | Art::Sword | Art::FireWand => GOLDEN_RATIO / 2.0,
             Art::Lockbox | Art::Compass | Art::Fireball | Art::Hero => 0.5,
             Art::Xp => 0.05,
             Art::TripletuftedTerrorworm
@@ -1467,6 +1582,14 @@ impl Item {
             Item::Weapon(w) => w.description(),
         }
     }
+
+    fn as_weapon(self) -> Option<WeaponItem> {
+        if let Item::Weapon(w) = self {
+            Some(w)
+        } else {
+            None
+        }
+    }
 }
 
 impl Item {
@@ -1482,6 +1605,7 @@ impl Item {
                 Circle::hurt(0.125, vec2(0.0, 0.65)),
             ]),
             wep: WeaponState::new(WeaponKind::Sword, owner),
+            heatable: Heatable::yes(),
             contacts: Contacts::default(),
         })
     }
@@ -1493,6 +1617,19 @@ impl Item {
             rot: Rot(0.0),
             phys: Phys::new(),
             wep: WeaponState::new(WeaponKind::Bow, owner),
+            heatable: Heatable::no(),
+            contacts: Contacts::default(),
+        })
+    }
+
+    fn fire_wand(owner: hecs::Entity) -> Self {
+        Item::Weapon(WeaponItem {
+            pos: Vec2::zero(),
+            art: Art::FireWand,
+            rot: Rot(0.0),
+            phys: Phys::new(),
+            wep: WeaponState::new(WeaponKind::FireWand, owner),
+            heatable: Heatable::no(),
             contacts: Contacts::default(),
         })
     }
@@ -1506,6 +1643,7 @@ struct WeaponItem {
     phys: Phys,
     wep: WeaponState,
     contacts: Contacts,
+    heatable: Heatable,
 }
 impl WeaponItem {
     fn description(&self) -> &'static str {
@@ -1566,24 +1704,49 @@ struct Bullet {
     min_vel: MinVelocity,
     pos: Vec2,
     rot: Rot,
+    scale: Scale,
+    shrink_out: ShrinkOut,
     contacts: Contacts,
 }
 
 #[derive(Copy, Clone)]
 struct BulletDamage {
     damage: u32,
-    knockback: f32,
+    heats: bool,
+    invincible_until_tick: u32,
+    target_knockback: f32,
+    attacker_knockback: f32,
     crit_chance: f32,
+    children: Option<(usize, BulletKind)>,
 }
 
-struct BulletHit {
-    fireball_ent: hecs::Entity,
-    fireball: BulletDamage,
-    hit: hecs::Entity,
-    pos: Vec2,
+#[derive(Copy, Clone)]
+struct ShrinkOut {
+    end_tick: u32,
+    shrink_at: u32,
 }
+
+enum BulletDeath {
+    Hit {
+        fireball_ent: hecs::Entity,
+        fireball: BulletDamage,
+        hit: hecs::Entity,
+        pos: Vec2,
+    },
+    Fade { fireball_ent: hecs::Entity },
+}
+impl BulletDeath {
+    fn fireball_ent(&self) -> hecs::Entity {
+        use BulletDeath::*;
+        match self {
+            &Hit { fireball_ent, .. } => fireball_ent,
+            &Fade { fireball_ent, .. } => fireball_ent,
+        }
+    }
+}
+
 struct Bullets {
-    dead: Vec<BulletHit>,
+    dead: Vec<BulletDeath>,
 }
 impl Bullets {
     fn new() -> Self {
@@ -1591,31 +1754,76 @@ impl Bullets {
     }
 
     fn update(&mut self, game: &mut Game, quests: &mut Quests) {
+        let &mut Game { tick, .. } = game;
         let Game { ecs, .. } = game;
+
+        system!(ecs, fireball_ent,
+            &ShrinkOut { end_tick, shrink_at } = &_
+            Scale(scale)                       = &mut _
+        {
+            if tick > end_tick {
+                self.dead.push(BulletDeath::Fade { fireball_ent});
+            }
+            if tick > shrink_at {
+                *scale = Vec2::one() * (1.0 - (tick - shrink_at) as f32 / (end_tick - shrink_at) as f32);
+            }
+        });
+
+        system!(ecs, _,
+            Heatable { active, heat, lose_heat_tick } = &mut _
+        {
+            if *active {
+                if tick > *lose_heat_tick {
+                    *lose_heat_tick = tick + 100;
+                    *heat = heat.saturating_sub(1);
+                }
+            }
+        });
 
         system!(ecs, ent,
             Contacts(hits) = &mut _
             &pos           = &Vec2
             &fireball      = &BulletDamage
         {
+            if tick < fireball.invincible_until_tick {
+                continue
+            }
             if let Some(Hit { hit, .. }) = hits.pop() {
-                self.dead.push(BulletHit { fireball_ent: ent, fireball, hit, pos });
+                self.dead.push(BulletDeath::Hit { fireball_ent: ent, fireball, hit, pos });
             }
         });
 
-        for BulletHit { fireball_ent, fireball, hit, pos } in self.dead.drain(..) {
-            let (dead, _) = game.hit(HitInput {
-                hitter_pos: pos,
-                hit: WeaponHit { hit },
-                damage: fireball.damage,
-                knockback: fireball.knockback,
-                crit_chance: fireball.crit_chance,
-            });
-            if dead {
-                quests.update(game);
+        for death in self.dead.drain(..) {
+            if !game.ecs.contains(death.fireball_ent()) {
+                continue;
             }
 
-            or_err!(game.ecs.despawn(fireball_ent));
+            if let BulletDeath::Hit { fireball, hit, pos, .. } = death {
+                if let Some((count, kind)) = fireball.children {
+                    for _ in 0..count {
+                        game.ecs.spawn(kind.bullet(pos, rand_vec2(), tick));
+                    }
+                }
+
+                if fireball.heats {
+                    if let Ok(Heatable { active: true, heat, .. }) = game.ecs.get_mut(hit).as_deref_mut() {
+                        *heat += 1;
+                    }
+                }
+
+                let (dead, _) = game.hit(HitInput {
+                    hitter_pos: pos,
+                    hit: WeaponHit { hit },
+                    damage: fireball.damage,
+                    knockback: fireball.target_knockback,
+                    crit_chance: fireball.crit_chance,
+                });
+                if dead {
+                    quests.update(game);
+                }
+            }
+
+            or_err!(game.ecs.despawn(death.fireball_ent()));
         }
     }
 }
@@ -1977,12 +2185,12 @@ fn update_hero(
     let mut swing_dir = None;
     let mut mid_swing = false;
     let mut swing_ends = None;
-    let (hero_attacks, hero_bullet) = hero_wep
+    let (hero_attacks, mut hero_bullets) = hero_wep
         .and_then(|e| ecs.query_one_mut::<Weapon>(e).ok())
         .map(|mut wep| {
             let attack_kind = match wep.wep.kind {
                 WeaponKind::Sword => AttackKind::Swipe,
-                WeaponKind::Bow => AttackKind::Shoot,
+                WeaponKind::Bow | WeaponKind::FireWand => AttackKind::Shoot,
             };
             wep.tick(WeaponInput {
                 start_attacking: Some(attack_kind)
@@ -2000,7 +2208,7 @@ fn update_hero(
 
             swing_ends = wep.swing_ends();
 
-            (wep.attack_hits(), wep.bullet())
+            (wep.attack_hits(), wep.bullets(tick))
         })
         .unwrap_or_default();
 
@@ -2052,32 +2260,24 @@ fn update_hero(
         if dead {
             quests.update(game);
         }
-        acc + vel
+        acc + vel * 0.2
     });
 
     if let Some(bullet) = swing_dir
         .filter(|_| mid_swing)
         .filter(|_| rand::gen_range(0.0, 1.0) < hero_mod.fireball_chance)
-        .map(|dir| Bullet {
-            pos: hero_pos + dir * 2.0 + vec2(0.0, 0.5),
-            art: Art::Fireball,
-            dmg: BulletDamage { damage: 3, knockback: 0.2, crit_chance: hero_mod.crit_chance },
-            phy: Phys::new()
-                .insert(Circle::hurt(0.4, Vec2::zero()))
-                .insert(Circle::push(0.1, Vec2::zero())),
-            vel: Velocity(dir / 6.0),
-            min_vel: MinVelocity(dir / 15.0),
-            rot: Rot(Rot::from_vec2(dir).0 + PI),
-            contacts: Contacts::default(),
-        })
-        .or(hero_bullet)
+        .map(|dir| BulletKind::Fireball.bullet(hero_pos + dir + vec2(0.0, 0.5), dir, tick))
     {
-        knockback += bullet.rot.vec2() * 0.35;
+        hero_bullets.push(bullet);
+    }
+
+    for bullet in hero_bullets.into_iter() {
+        knockback += bullet.rot.vec2() * bullet.dmg.attacker_knockback;
         game.ecs.spawn(bullet);
     }
 
-    if let Ok(mut v) = game.ecs.get_mut::<Velocity>(hero) {
-        v.knockback(knockback, 0.125);
+    if let Ok(Velocity(v)) = game.ecs.get_mut::<Velocity>(hero).as_deref_mut() {
+        *v += knockback;
     }
 }
 
@@ -2225,7 +2425,7 @@ impl Waffle {
             if let Ok(Some(wep_ent)) =
                 game.ecs.get_mut::<Bag>(e).map(|mut b| b.weapon.as_mut().and_then(|w| w.out()))
             {
-                let (attacks, bullet) = game
+                let (attacks, bullets) = game
                     .ecs
                     .query_one_mut::<Weapon>(wep_ent)
                     .ok()
@@ -2243,13 +2443,13 @@ impl Waffle {
                             speed_multiplier: 1.0,
                             tick,
                         });
-                        (wep.attack_hits(), wep.bullet())
+                        (wep.attack_hits(), wep.bullets(tick))
                     })
                     .unwrap_or_default();
 
-                if let Some(bullet) = bullet {
+                for bullet in bullets {
                     if let Ok(mut v) = game.ecs.get_mut::<Velocity>(e) {
-                        v.knockback(bullet.rot.vec2(), 0.035);
+                        v.knockback(bullet.rot.vec2(), bullet.dmg.attacker_knockback * 0.1);
                     }
                     game.ecs.spawn(bullet);
                 }
@@ -2542,7 +2742,10 @@ async fn main() {
     }
     chest(&mut ecs, vec2(0.0, 0.0), smallvec![Item::bow(hero)]);
     ecs.spawn((vec2(-1.0, 0.0), Art::Sword));
-    ecs.spawn((vec2(-2.0, 0.0), Art::Bow));
+    ecs.spawn((vec2(-1.0, 2.0), Art::FireWand));
+    let fw = ecs.spawn(());
+    or_err!(ecs.insert(fw, Item::fire_wand(hero).as_weapon().unwrap()));
+    or_err!(ecs.insert_one(fw, PickUp::default()));
 
     type Post = (Vec2, Art, Phys);
     #[derive(Clone, Copy)]
@@ -3735,7 +3938,7 @@ fn health_bar(size: Vec2, ratio: f32, pos: Vec2) -> Color {
     color
 }
 
-type SpriteData = (Vec2, Art, ZOffset, Option<Rot>, Option<Scale>);
+type SpriteData = (Vec2, Art, ZOffset, Option<Rot>, Option<Scale>, Option<Heatable>);
 struct Drawer {
     sprites: Vec<SpriteData>,
     damage_labels: DamageLabelBin,
@@ -3802,12 +4005,12 @@ impl Drawer {
         let screen_size = *screen * flip_y * 2.0;
 
         sprites.extend(
-            ecs.query::<(&_, &_, Option<&ZOffset>, Option<&Rot>, Option<&Scale>)>()
+            ecs.query::<(&_, &_, Option<&ZOffset>, Option<&Rot>, Option<&Scale>, Option<&Heatable>)>()
                 .iter()
-                .map(|(_, (&p, &a, z, r, s))| {
-                    (p, a, z.copied().unwrap_or_default(), r.copied(), s.copied())
+                .map(|(_, (&p, &a, z, r, s, h))| {
+                    (p, a, z.copied().unwrap_or_default(), r.copied(), s.copied(), h.copied())
                 })
-                .filter(|&(p, art, _, rot, _): &SpriteData| {
+                .filter(|&(p, art, _, rot, ..): &SpriteData| {
                     let (x, m) = rot.map(|_| (0.0, 2.0)).unwrap_or((1.0, 1.0));
                     let bound = Vec2::splat(art.bounding() * m);
                     let from = (p + vec2(0.0, bound.x() * x) - top_left) * flip_y;
@@ -3815,8 +4018,8 @@ impl Drawer {
                 }),
         );
         sprites.sort_by(|a, b| float_cmp(b, a, |(pos, art, z, ..)| pos.y() + art.z_offset() + z.0));
-        for (pos, art, _, rot, scale) in sprites.drain(..) {
-            let mut push_model_matrix = || {
+        for (pos, art, _, rot, scale, heat) in sprites.drain(..) {
+            let push_model_matrix = |gl: &mut QuadGl| {
                 gl.push_model_matrix(
                     glam::Mat4::from_translation(glam::vec3(pos.x(), pos.y(), 0.0))
                         * rot.map(|Rot(r)| glam::Mat4::from_rotation_z(r)).unwrap_or_default()
@@ -3839,7 +4042,7 @@ impl Drawer {
                 Art::Goblin => rect(DARKGREEN, 0.6, 0.6),
                 Art::Npc => rect(GREEN, 1.0, GOLDEN_RATIO),
                 Art::Bow(r) => {
-                    push_model_matrix();
+                    push_model_matrix(gl);
                     draw_line(-0.1, -1.0, -0.1 - r * 0.3, 0.0, 0.035, LIGHTGRAY);
                     draw_line(-0.1, 1.0, -0.1 - r * 0.3, 0.0, 0.035, LIGHTGRAY);
 
@@ -3944,7 +4147,7 @@ impl Drawer {
                     draw_circle(x, y + 0.05 + o * 1.1, 0.05, color);
                 }
                 Art::Fireball => {
-                    push_model_matrix();
+                    push_model_matrix(gl);
                     let mut color = ORANGE;
                     for q in 0..10 {
                         let i = q % 5;
@@ -3963,7 +4166,7 @@ impl Drawer {
                     gl.pop_model_matrix();
                 }
                 Art::Arrow => {
-                    push_model_matrix();
+                    push_model_matrix(gl);
                     draw_triangle(vec2(0.11, 0.0), vec2(-0.11, 0.0), vec2(0.00, GOLDEN_RATIO), RED);
                     draw_triangle(
                         vec2(-0.225, 0.85),
@@ -3973,27 +4176,66 @@ impl Drawer {
                     );
                     gl.pop_model_matrix();
                 }
+                Art::FireWand => {
+                    push_model_matrix(gl);
+                    draw_line(   0.235, 1.20,
+                                -0.010, 0.25, 0.06, DARKGRAY);
+                    draw_line(   0.235, 1.20,
+                                -0.065, 0.55, 0.05, DARKGRAY);
+                    draw_line(  -0.140, 1.30,
+                                -0.010, 0.25, 0.10, DARKGRAY);
+                    draw_poly(   0.05 , 1.15, 5, 0.18, 0.0, DARKGRAY);
+                    draw_circle( 0.05 , 1.15, 0.11, RED);
+                    draw_circle( 0.05 , 1.15, 0.08 * (tick as f32 / 20.0).sin(), BLACK);
+                    /*
+                    draw_poly(-0.1, 0.76, 5, 0.18, 0.0, DARKGRAY);
+                    draw_circle(-0.1, 0.76, 0.11, RED);
+                    draw_circle(-0.1, 0.76, 0.08 * (tick as f32 / 20.0).sin(), BLACK);
+                    draw_line(0.0, 0.6, 0.3, 1.0, 0.1, DARKGRAY);
+                    draw_line(-0.3, 0.9, 0.3, 1.0, 0.1, DARKGRAY);
+                    draw_line(0.0, 0.0, 0.2, 0.7, 0.07, DARKGRAY);
+                    draw_line(0.0, 0.6, 0.2, 0.7, 0.08, DARKGRAY);
+                    draw_line(0.0, 0.6, 0.3, 1.0, 0.1, GRAY);
+                    draw_line(-0.3, 0.9, 0.3, 1.0, 0.1, GRAY);
+                    */
+                    gl.pop_model_matrix()
+                }
                 Art::Sword => {
-                    push_model_matrix();
+                    push_model_matrix(gl);
                     draw_triangle(
                         vec2(0.075, 0.0),
                         vec2(-0.075, 0.0),
                         vec2(0.00, GOLDEN_RATIO),
                         DARKBROWN,
                     );
+                    let mut gray = GRAY;
+                    if let Some(Heatable { active: true, heat, lose_heat_tick, .. }) = heat {
+                        fn lerp(a: u8, b: u8, t: f32) -> u8 {
+                            a.saturating_add(((a - b) as f32 * t) as u8)
+                        }
+                        fn gray_at(heat: u8) -> u8 {
+                            GRAY.0[0].saturating_add(heat.saturating_mul(heat))
+                        }
+
+                        gray.0[0] = lerp(
+                            gray_at(heat),
+                            gray_at(heat.saturating_sub(1)),
+                            (lose_heat_tick - tick) as f32 / 100.0,
+                        );
+                    }
                     for &dir in &[-1.0, 1.0] {
                         draw_triangle(
                             vec2(0.00, GOLDEN_RATIO),
                             vec2(dir * 0.1, 0.35),
                             vec2(0.20 * dir, 1.35),
-                            GRAY,
+                            gray,
                         )
                     }
                     draw_triangle(
                         vec2(-0.1, 0.35),
                         vec2(0.1, 0.35),
                         vec2(0.00, GOLDEN_RATIO),
-                        GRAY,
+                        gray,
                     );
 
                     let (x, y) = vec2(-0.225, 0.400).into();
@@ -4025,6 +4267,7 @@ impl Drawer {
                     Push => PURPLE,
                     Hit => PINK,
                     Hurt => DARKBLUE,
+                    _ => BLACK
                 }
             }
 
