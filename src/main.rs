@@ -2244,7 +2244,7 @@ fn update_hero(
                 .unwrap_or(false);
 
             if added {
-                ecs.spawn((DamageLabel { tick, hp: (add_hp as i32), pos: hero_pos },));
+                ecs.spawn((DamageLabel { tick, hp: (add_hp as i32), pos: hero_pos, for_ent: hero },));
             }
         }
     }
@@ -3470,7 +3470,12 @@ impl Game {
 
                 or_err!(self.ecs.despawn(hit));
             }
-            self.ecs.spawn((DamageLabel { tick, hp: -(damage as i32), pos },));
+            self.ecs.spawn((DamageLabel {
+                tick,
+                hp: -(damage as i32),
+                pos,
+                for_ent: hit,
+            },));
 
             (dead, (hitter_pos - pos).normalize())
         } else {
@@ -3870,6 +3875,7 @@ impl Fps {
 
 #[derive(Debug, Clone, Copy)]
 struct DamageLabel {
+    for_ent: hecs::Entity,
     pos: Vec2,
     hp: i32,
     tick: u32,
@@ -3881,30 +3887,54 @@ impl DamageLabel {
 }
 
 struct DamageLabelBin {
+    labels: Vec<(hecs::Entity, DamageLabel)>,
     stale: Vec<hecs::Entity>,
     text: String,
 }
 impl DamageLabelBin {
     fn new() -> Self {
-        Self { stale: Vec::with_capacity(100), text: String::with_capacity(100) }
+        Self { labels: Vec::with_capacity(100), stale: Vec::with_capacity(100), text: String::with_capacity(100) }
     }
 
     fn update(&mut self, Game { ecs, tick, .. }: &mut Game) {
-        self.stale.extend(
+        self.labels.extend(
             ecs.query::<&DamageLabel>()
                 .iter()
-                .filter(|(_, dl)| *tick > dl.end_tick())
-                .map(|(e, _)| e),
+                .map(|(e, l)| (e, *l))
         );
+        
+        self.stale.extend(
+            self.labels
+                .drain(..)
+                .filter(|(e, dl)| {
+                    if *tick > dl.end_tick() {
+                        return true
+                    } else if dl.tick == *tick {
+                        for (e2, dl2) in &mut ecs.query::<&mut DamageLabel>() {
+                            if *e < e2 && dl2.for_ent == dl.for_ent && (dl2.pos - dl.pos).length() < 1.3 {
+                                dl2.tick = dl.tick;
+                                dl2.hp += dl.hp;
+                                dl2.pos = dl.pos;
+                                return true;
+                            }
+                        }
+                    }
+
+                    false
+                })
+                .map(|(e, _)| e)
+        );
+
         for e in self.stale.drain(..) {
             or_err!(ecs.despawn(e));
         }
+
     }
 
     fn draw(&mut self, Game { ecs, tick: game_tick, .. }: &Game, cam: &Camera2D) {
         let Self { text, .. } = self;
 
-        for (_, &DamageLabel { hp, pos, tick }) in ecs.query::<&_>().iter() {
+        for (_, &DamageLabel { hp, pos, tick, .. }) in ecs.query::<&_>().iter() {
             *text = hp.to_string();
             let (x, y) = cam.world_to_screen(pos + vec2(0.0, 1.35)).into();
             draw_text(
@@ -4223,6 +4253,7 @@ impl Drawer {
                             (lose_heat_tick - tick) as f32 / 100.0,
                         );
                     }
+
                     for &dir in &[-1.0, 1.0] {
                         draw_triangle(
                             vec2(0.00, GOLDEN_RATIO),
