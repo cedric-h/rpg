@@ -884,7 +884,7 @@ impl BulletKind {
                     .insert(Circle::ghost_hit(0.13, dir * -0.2))
                     .insert(Circle::ghost_push(0.08, dir * -0.25)),
                 vel: Velocity(dir / 1.8),
-                min_vel: MinVelocity(dir / 4.3),
+                min_vel: MinVelocity(dir / 2.8),
                 shrink_out: ShrinkOut { end_tick: tick + 800, shrink_at: tick + 775 },
                 scale: Scale::default(),
                 rot: Rot::from_vec2(dir),
@@ -1946,17 +1946,16 @@ impl Bullets {
                         .map(|(ra, rot)| (*ra, *rot));
                     if let Some((ReflectArrows(true), rot)) = reflect_arrows {
                         let n = rot.vec2();
-                        let reflected = vel - 2.0 * vel.dot(n) * n;
+                        let reflected = (vel - 2.0 * vel.dot(n) * n).normalize();
                         or_err!(game.ecs.despawn(bullet_ent));
                         game.ecs.spawn({
                             let mut r = BulletKind::Arrow.bullet(
-                                pos + 2.0 * reflected,
-                                reflected,
+                                pos + reflected * 1.34,
+                                reflected * 0.5,
                                 tick,
                                 alignment,
                             );
-                            r.bul.invincible_until_tick = tick + 10;
-                            r.vel.0 *= 3.0;
+                            r.bul.invincible_until_tick = tick + 2;
                             r
                         });
                         continue;
@@ -2889,7 +2888,7 @@ async fn main() {
         ecs.spawn((
             pos,
             Art::Chest,
-            Phys::new().wings(0.4, 0.4, CircleKind::Push).wings(0.4, 0.4, CircleKind::Hit),
+            Phys::new().wings(0.325, 0.325, CircleKind::Push).wings(0.325, 0.325, CircleKind::Hit),
             Velocity::default(),
             Health::full(3),
             SpillXp(15),
@@ -4238,17 +4237,17 @@ impl Drawer {
                     );
                 }
 
-                draw_line(0.8 + x, 0.0, 0.05 + x, 0.0, 0.08, DARKBROWN);
+                draw_line(1.05 + x, 0.0, 0.05 + x, 0.0, 0.08, DARKBROWN);
                 draw_triangle(
-                    vec2(1.09 + x, 0.0),
-                    vec2(0.85 + x, -0.105),
-                    vec2(0.85 + x, 0.105),
+                    vec2(1.34 + x, 0.0),
+                    vec2(1.1 + x, -0.105),
+                    vec2(1.1 + x, 0.105),
                     GRAY,
                 );
                 draw_triangle(
-                    vec2(0.725 + x, 0.0),
-                    vec2(0.850 + x, -0.105),
-                    vec2(0.850 + x, 0.105),
+                    vec2(0.975 + x, 0.0),
+                    vec2(1.1 + x, -0.105),
+                    vec2(1.1 + x, 0.105),
                     GRAY,
                 );
             }
@@ -4396,7 +4395,7 @@ impl Drawer {
                 }
                 Art::Arrow => {
                     push_model_matrix(gl);
-                    arrow(-1.09);
+                    arrow(-1.34);
                     gl.pop_model_matrix();
                 }
                 Art::RedArrow => {
