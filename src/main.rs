@@ -135,7 +135,7 @@ impl Phys {
     }
 
     fn pushfoot_bighit(self) -> Self {
-        self.insert(Circle::push(0.3, vec2(0.0, 0.1))).insert(Circle::hit(0.4, vec2(0.0, 0.4)))
+        self.insert(Circle::push(0.2, vec2(0.0, 0.2))).insert(Circle::hit(0.4, vec2(0.0, 0.4)))
     }
 
     fn wings(self, r: f32, wr: f32, kind: CircleKind) -> Self {
@@ -772,20 +772,20 @@ impl KeeperOfBags {
 #[derive(Debug, Clone, Copy)]
 enum WeaponKind {
     Sword,
-    Bow,
+    Bow(BulletKind),
     FireWand,
 }
 impl WeaponKind {
     fn hand_offset(self) -> f32 {
         match self {
-            WeaponKind::Bow => -0.75,
+            WeaponKind::Bow(_) => -0.75,
             _ => 0.0,
         }
     }
 
     fn hand_rotation(self) -> f32 {
         match self {
-            WeaponKind::Bow => FRAC_PI_2,
+            WeaponKind::Bow(_) => FRAC_PI_2,
             _ => 0.0,
         }
     }
@@ -793,7 +793,8 @@ impl WeaponKind {
     fn attack_speed(self) -> f32 {
         match self {
             WeaponKind::Sword => 1.0,
-            WeaponKind::Bow => 1.0,
+            WeaponKind::Bow(BulletKind::Arrow) => 1.35,
+            WeaponKind::Bow(_) => 1.0,
             WeaponKind::FireWand => 1.25,
         }
     }
@@ -801,23 +802,38 @@ impl WeaponKind {
     fn shots_per_use(self) -> usize {
         match self {
             WeaponKind::Sword => 0,
-            WeaponKind::Bow => 1,
+            WeaponKind::Bow(_) => 1,
             WeaponKind::FireWand => 25,
         }
     }
 
-    fn bullets(self, pos: Vec2, dir: Vec2, tick: u32) -> SmallVec<[Bullet; 5]> {
+    fn bullets(
+        self,
+        pos: Vec2,
+        dir: Vec2,
+        tick: u32,
+        alignment: Alignment,
+    ) -> SmallVec<[BulletBundle; 5]> {
         match self {
-            WeaponKind::Bow => smallvec![BulletKind::Fireball.bullet(pos + dir * 1.2, dir, tick)],
-            WeaponKind::FireWand => (0..6).map(|_| {
-                let shaken = Rot(rand::gen_range(-1.05, 1.05)).apply(dir);
-                let mut sparkball = BulletKind::Sparkball(0.8, 1.0).bullet(pos + shaken * 2.2, shaken, tick);
-                sparkball.vel.0 *= 0.45;
-                sparkball.min_vel.0 *= 0.6;
-                sparkball.shrink_out.end_tick += 30;
-                sparkball.dmg.invincible_until_tick = tick;
-                sparkball
-            }).collect(),
+            WeaponKind::Bow(bullet) => {
+                smallvec![bullet.bullet(pos + dir * 1.2, dir, tick, alignment)]
+            }
+            WeaponKind::FireWand => (0..6)
+                .map(|_| {
+                    let shaken = Rot(rand::gen_range(-1.05, 1.05)).apply(dir);
+                    let mut sparkball = BulletKind::Sparkball(0.8, 1.0).bullet(
+                        pos + shaken * 2.2,
+                        shaken,
+                        tick,
+                        alignment,
+                    );
+                    sparkball.vel.0 *= 0.45;
+                    sparkball.min_vel.0 *= 0.6;
+                    sparkball.shrink_out.end_tick += 30;
+                    sparkball.bul.invincible_until_tick = tick;
+                    sparkball
+                })
+                .collect(),
             _ => smallvec![],
         }
     }
@@ -831,42 +847,63 @@ struct Heatable {
 }
 impl Heatable {
     fn yes() -> Self {
-        Self {
-            active: true,
-            heat: 0,
-            lose_heat_tick: 0,
-        }
+        Self { active: true, heat: 0, lose_heat_tick: 0 }
     }
     fn no() -> Self {
-        Self {
-            active: false,
-            heat: 0,
-            lose_heat_tick: 0,
-        }
+        Self { active: false, heat: 0, lose_heat_tick: 0 }
     }
 }
 
 #[derive(Copy, Clone, Debug)]
 enum BulletKind {
+    Arrow,
     Fireball,
     Sparkball(f32, f32),
 }
 impl BulletKind {
-    fn bullet(self, pos: Vec2, dir: Vec2, tick: u32) -> Bullet {
+    fn bullet(self, pos: Vec2, dir: Vec2, tick: u32, alignment: Alignment) -> BulletBundle {
         use BulletKind::*;
         match self {
-            Fireball => Bullet {
+            Arrow => BulletBundle {
+                pos,
+                art: Art::Arrow,
+                bul: Bullet {
+                    behavior: BulletBehavior::Arrow,
+                    damage: 1,
+                    heat: 0,
+                    target_knockback: 0.2,
+                    attacker_knockback: 0.15,
+                    crit_chance: 0.01,
+                    children: None,
+                    invincible_until_tick: tick,
+                },
+                alignment,
+                phy: Phys::new()
+                    .insert(Circle::hurt(0.13, dir * -0.2))
+                    .insert(Circle::hurt(0.13, dir * -0.4))
+                    .insert(Circle::ghost_hit(0.13, dir * -0.2))
+                    .insert(Circle::ghost_push(0.08, dir * -0.25)),
+                vel: Velocity(dir / 1.8),
+                min_vel: MinVelocity(dir / 4.3),
+                shrink_out: ShrinkOut { end_tick: tick + 800, shrink_at: tick + 775 },
+                scale: Scale::default(),
+                rot: Rot::from_vec2(dir),
+                contacts: Contacts::default(),
+            },
+            Fireball => BulletBundle {
                 pos,
                 art: Art::Fireball,
-                dmg: BulletDamage {
+                bul: Bullet {
+                    behavior: BulletBehavior::BreakAlways,
                     damage: 3,
-                    heats: true,
+                    heat: 3,
                     target_knockback: 0.2,
                     attacker_knockback: 0.15,
                     crit_chance: 0.01,
                     children: Some((12, Sparkball(0.0, 1.0))),
                     invincible_until_tick: tick,
                 },
+                alignment,
                 phy: Phys::new()
                     .insert(Circle::hurt(0.4, Vec2::zero()))
                     .insert(Circle::ghost_hit(0.4, Vec2::zero()))
@@ -875,32 +912,37 @@ impl BulletKind {
                 min_vel: MinVelocity(dir / 12.0),
                 shrink_out: ShrinkOut { end_tick: tick + 150, shrink_at: tick + 125 },
                 scale: Scale::default(),
-                rot: Rot(Rot::from_vec2(dir).0 + PI),
+                rot: Rot::from_vec2(dir),
                 contacts: Contacts::default(),
             },
             Sparkball(min, max) => {
                 let dir = dir * rand::gen_range(min, max);
-                Bullet {
+                BulletBundle {
                     pos,
                     art: Art::Fireball,
-                    dmg: BulletDamage {
+                    bul: Bullet {
+                        behavior: BulletBehavior::BreakAlways,
                         damage: 1,
-                        heats: true,
+                        heat: 1,
                         crit_chance: 0.01,
                         target_knockback: 0.01,
                         attacker_knockback: 0.015,
                         children: None,
                         invincible_until_tick: tick + 2,
                     },
+                    alignment,
                     phy: Phys::new()
                         .insert(Circle::hurt(0.04, Vec2::zero()))
                         .insert(Circle::ghost_push(0.04, Vec2::zero()))
                         .insert(Circle::ghost_hit(0.04, Vec2::zero())),
                     vel: Velocity(dir / 5.0),
                     min_vel: MinVelocity(dir / 16.0),
-                    shrink_out: ShrinkOut { end_tick: tick + rand::gen_range(20, 45), shrink_at: tick },
+                    shrink_out: ShrinkOut {
+                        end_tick: tick + rand::gen_range(20, 45),
+                        shrink_at: tick,
+                    },
                     scale: Scale::default(),
-                    rot: Rot(Rot::from_vec2(dir).0 + PI),
+                    rot: Rot::from_vec2(dir),
                     contacts: Contacts::default(),
                 }
             }
@@ -1062,11 +1104,11 @@ impl Weapon<'_> {
         }
     }
 
-    fn bullets(&mut self, tick: u32) -> SmallVec<[Bullet; 5]> {
+    fn bullets(&mut self, tick: u32, alignment: Alignment) -> SmallVec<[BulletBundle; 5]> {
         match &mut self.wep.attack {
             Attack::Swing(s) if s.doing_damage && s.times_fired < self.wep.kind.shots_per_use() => {
                 s.times_fired += 1;
-                self.wep.kind.bullets(*self.pos, s.toward, tick)
+                self.wep.kind.bullets(*self.pos, s.toward, tick, alignment)
             }
             _ => smallvec![],
         }
@@ -1077,7 +1119,7 @@ impl Weapon<'_> {
         WeaponInput { wielder_pos, wielder_vel, wielder_dir, tick, .. }: WeaponInput,
     ) -> (Rot, Vec2) {
         let dir = match self.wep.kind {
-            WeaponKind::Bow => 1.0,
+            WeaponKind::Bow(_) => 1.0,
             _ => wielder_dir.signum(),
         };
 
@@ -1108,8 +1150,7 @@ impl Weapon<'_> {
                 Swing(SwingState {
                     start_tick: tick,
                     times_fired: 0,
-                    end_tick: tick
-                        + (dur + (dur as f32 * (1.0 - m)).round()) as u32,
+                    end_tick: tick + (dur + (dur as f32 * (1.0 - m)).round()) as u32,
                     attack_kind,
                     toward: self.from_center(wielder_pos, target),
                     doing_damage: false,
@@ -1137,7 +1178,7 @@ impl Weapon<'_> {
     fn swing(
         &mut self,
         input: WeaponInput,
-        SwingState { attack_kind, start_tick, end_tick, toward, .. }: SwingState,
+        SwingState { times_fired, attack_kind, start_tick, end_tick, toward, .. }: SwingState,
     ) -> bool {
         let WeaponInput { wielder_pos, tick, .. } = input;
         let (start_rot, start_pos) = self.rest(input);
@@ -1208,12 +1249,12 @@ impl Weapon<'_> {
             last_tick = tick;
         }
 
-        if let Art::Bow(_) = self.art {
-            *self.art = Art::Bow(if start_tick + 50 > tick {
-                (tick - start_tick) as f32 / 50.0
+        if let Art::FireBow(r) | Art::Bow(r) = &mut self.art {
+            *r = if times_fired != self.wep.kind.shots_per_use() && start_tick + dt as u32 > tick {
+                (tick - start_tick) as f32 / dt
             } else {
                 0.0
-            });
+            };
         }
 
         do_damage
@@ -1309,10 +1350,12 @@ enum Art {
     Trinket(Trinket),
     Fireball,
     Harp,
+    FireBow(f32),
     Bow(f32),
     Xp,
     Compass,
     Scarecrow,
+    RedArrow,
     Arrow,
     Chest,
     Lockbox,
@@ -1330,7 +1373,7 @@ impl Art {
     fn z_offset(self) -> f32 {
         match self {
             Art::Sword | Art::FireWand => -0.5,
-            Art::Bow(_) => -0.5,
+            Art::FireBow(_) | Art::Bow(_) => -0.5,
             _ => 0.0,
         }
     }
@@ -1341,12 +1384,14 @@ impl Art {
             Art::Consumable(c) => c.name(),
             Art::Trinket(t) => t.name(),
             Art::Fireball => "Fireball",
+            Art::Arrow => "Arrow",
             Art::Xp => "Xp",
             Art::Scarecrow => "Scarecrow",
             Art::Goblin => "Goblin",
-            Art::Arrow => "Arrow",
+            Art::RedArrow => "Red Arrow",
             Art::Chest => "Chest",
             Art::Harp => "Harp",
+            Art::FireBow(_) => "Fire Bow",
             Art::Bow(_) => "Bow",
             Art::Lockbox => "Lockbox",
             Art::Book => "Grey Book",
@@ -1363,13 +1408,16 @@ impl Art {
 
     fn bounding(self) -> f32 {
         match self {
-            Art::Book | Art::Arrow | Art::Chest | Art::Npc | Art::Sword | Art::FireWand => GOLDEN_RATIO / 2.0,
-            Art::Lockbox | Art::Compass | Art::Fireball | Art::Hero => 0.5,
+            Art::Book | Art::RedArrow | Art::Chest | Art::Npc | Art::Sword | Art::FireWand => {
+                GOLDEN_RATIO / 2.0
+            }
+            Art::Lockbox | Art::Compass | Art::Fireball | Art::Hero | Art::Arrow => 0.5,
             Art::Xp => 0.05,
             Art::TripletuftedTerrorworm
             | Art::VioletVagabond
             | Art::Scarecrow
             | Art::Harp
+            | Art::FireBow(_)
             | Art::Bow(_) => 0.4,
             Art::Goblin => 0.3,
             Art::Tree => 2.0,
@@ -1607,31 +1655,33 @@ impl Item {
             wep: WeaponState::new(WeaponKind::Sword, owner),
             heatable: Heatable::yes(),
             contacts: Contacts::default(),
+            reflect_arrows: ReflectArrows(true),
+        })
+    }
+
+    fn ranged(art: Art, wep_kind: WeaponKind, owner: hecs::Entity) -> Self {
+        Item::Weapon(WeaponItem {
+            pos: Vec2::zero(),
+            art,
+            rot: Rot(0.0),
+            phys: Phys::new(),
+            wep: WeaponState::new(wep_kind, owner),
+            heatable: Heatable::no(),
+            contacts: Contacts::default(),
+            reflect_arrows: ReflectArrows(false),
         })
     }
 
     fn bow(owner: hecs::Entity) -> Self {
-        Item::Weapon(WeaponItem {
-            pos: Vec2::zero(),
-            art: Art::Bow(0.0),
-            rot: Rot(0.0),
-            phys: Phys::new(),
-            wep: WeaponState::new(WeaponKind::Bow, owner),
-            heatable: Heatable::no(),
-            contacts: Contacts::default(),
-        })
+        Self::ranged(Art::Bow(0.0), WeaponKind::Bow(BulletKind::Arrow), owner)
+    }
+
+    fn fire_bow(owner: hecs::Entity) -> Self {
+        Self::ranged(Art::FireBow(0.0), WeaponKind::Bow(BulletKind::Fireball), owner)
     }
 
     fn fire_wand(owner: hecs::Entity) -> Self {
-        Item::Weapon(WeaponItem {
-            pos: Vec2::zero(),
-            art: Art::FireWand,
-            rot: Rot(0.0),
-            phys: Phys::new(),
-            wep: WeaponState::new(WeaponKind::FireWand, owner),
-            heatable: Heatable::no(),
-            contacts: Contacts::default(),
-        })
+        Self::ranged(Art::FireWand, WeaponKind::FireWand, owner)
     }
 }
 
@@ -1644,6 +1694,7 @@ struct WeaponItem {
     wep: WeaponState,
     contacts: Contacts,
     heatable: Heatable,
+    reflect_arrows: ReflectArrows,
 }
 impl WeaponItem {
     fn description(&self) -> &'static str {
@@ -1696,12 +1747,13 @@ fn circle_points(n: usize) -> impl Iterator<Item = Vec2> {
 }
 
 #[derive(hecs::Bundle)]
-struct Bullet {
+struct BulletBundle {
     art: Art,
-    dmg: BulletDamage,
+    bul: Bullet,
     phy: Phys,
     vel: Velocity,
     min_vel: MinVelocity,
+    alignment: Alignment,
     pos: Vec2,
     rot: Rot,
     scale: Scale,
@@ -1710,9 +1762,22 @@ struct Bullet {
 }
 
 #[derive(Copy, Clone)]
-struct BulletDamage {
+struct ShrinkOut {
+    end_tick: u32,
+    shrink_at: u32,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+enum Alignment {
+    Hero,
+    Enemy,
+}
+
+#[derive(Copy, Clone)]
+struct Bullet {
     damage: u32,
-    heats: bool,
+    heat: u8,
+    behavior: BulletBehavior,
     invincible_until_tick: u32,
     target_knockback: f32,
     attacker_knockback: f32,
@@ -1720,49 +1785,64 @@ struct BulletDamage {
     children: Option<(usize, BulletKind)>,
 }
 
-#[derive(Copy, Clone)]
-struct ShrinkOut {
-    end_tick: u32,
-    shrink_at: u32,
-}
-
 enum BulletDeath {
     Hit {
-        fireball_ent: hecs::Entity,
-        fireball: BulletDamage,
+        bullet_ent: hecs::Entity,
+        alignment: Alignment,
+        bullet: Bullet,
         hit: hecs::Entity,
         pos: Vec2,
+        vel: Vec2,
+        circle_kinds: [CircleKind; 2],
     },
-    Fade { fireball_ent: hecs::Entity },
+    Fade {
+        bullet_ent: hecs::Entity,
+    },
 }
 impl BulletDeath {
-    fn fireball_ent(&self) -> hecs::Entity {
+    fn bullet_ent(&self) -> hecs::Entity {
         use BulletDeath::*;
         match self {
-            &Hit { fireball_ent, .. } => fireball_ent,
-            &Fade { fireball_ent, .. } => fireball_ent,
+            &Hit { bullet_ent, .. } => bullet_ent,
+            &Fade { bullet_ent, .. } => bullet_ent,
         }
     }
 }
 
+#[derive(Copy, Clone)]
+enum BulletBehavior {
+    BreakAlways,
+    Arrow,
+}
+
+#[derive(Clone, Copy)]
+struct Stuck {
+    to: hecs::Entity,
+    offset: Vec2,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReflectArrows(bool);
+
 struct Bullets {
     dead: Vec<BulletDeath>,
+    stuck: Vec<(hecs::Entity, Stuck)>,
 }
 impl Bullets {
     fn new() -> Self {
-        Self { dead: Vec::with_capacity(100) }
+        Self { dead: Vec::with_capacity(100), stuck: Vec::with_capacity(100) }
     }
 
     fn update(&mut self, game: &mut Game, quests: &mut Quests) {
         let &mut Game { tick, .. } = game;
         let Game { ecs, .. } = game;
 
-        system!(ecs, fireball_ent,
+        system!(ecs, bullet_ent,
             &ShrinkOut { end_tick, shrink_at } = &_
             Scale(scale)                       = &mut _
         {
             if tick > end_tick {
-                self.dead.push(BulletDeath::Fade { fireball_ent});
+                self.dead.push(BulletDeath::Fade { bullet_ent });
             }
             if tick > shrink_at {
                 *scale = Vec2::one() * (1.0 - (tick - shrink_at) as f32 / (end_tick - shrink_at) as f32);
@@ -1781,49 +1861,118 @@ impl Bullets {
         });
 
         system!(ecs, ent,
-            Contacts(hits) = &mut _
-            &pos           = &Vec2
-            &fireball      = &BulletDamage
+            Contacts(hits)    = &_
+            &pos              = &Vec2
+            &bullet           = &Bullet
+            &alignment        = &Alignment
+            &MinVelocity(vel) = &_
         {
-            if tick < fireball.invincible_until_tick {
+            if tick < bullet.invincible_until_tick {
                 continue
             }
-            if let Some(Hit { hit, .. }) = hits.pop() {
-                self.dead.push(BulletDeath::Hit { fireball_ent: ent, fireball, hit, pos });
+            for &Hit { hit, circle_kinds, .. } in hits {
+                self.dead.push(BulletDeath::Hit {
+                    bullet_ent: ent,
+                    bullet,
+                    alignment,
+                    circle_kinds,
+                    hit, pos, vel,
+                });
             }
         });
 
+        self.stuck.extend(ecs.query::<&_>().iter().map(|(e, s)| (e, *s)));
+        for (e, Stuck { to, offset }) in self.stuck.drain(..) {
+            let parent_pos: Option<Vec2> = ecs.get(to).ok().as_deref().copied();
+            if let Some(parent_pos) = parent_pos {
+                or_err!(ecs.insert_one(e, offset + parent_pos));
+            } else {
+                or_err!(ecs.despawn(e));
+            }
+        }
+
+        self.dead.sort_unstable_by(|a, _| {
+            use std::cmp::Ordering;
+            if let BulletDeath::Hit { circle_kinds, .. } = a {
+                if circle_kinds.contains(&CircleKind::GhostHit) {
+                    return Ordering::Greater;
+                }
+            }
+            Ordering::Less
+        });
+
         for death in self.dead.drain(..) {
-            if !game.ecs.contains(death.fireball_ent()) {
+            if !game.ecs.contains(death.bullet_ent()) {
                 continue;
             }
 
-            if let BulletDeath::Hit { fireball, hit, pos, .. } = death {
-                if let Some((count, kind)) = fireball.children {
+            if let BulletDeath::Hit { bullet_ent, alignment, bullet, hit, vel, pos, .. } = death {
+                if game.ecs.get::<Alignment>(hit).as_deref().copied() == Ok(alignment) {
+                    continue;
+                }
+                if game.ecs.get::<Stuck>(bullet_ent).is_ok() {
+                    continue;
+                }
+
+                if let Some((count, kind)) = bullet.children {
                     for _ in 0..count {
-                        game.ecs.spawn(kind.bullet(pos, rand_vec2(), tick));
+                        game.ecs.spawn(kind.bullet(pos, rand_vec2(), tick, alignment));
                     }
                 }
 
-                if fireball.heats {
-                    if let Ok(Heatable { active: true, heat, .. }) = game.ecs.get_mut(hit).as_deref_mut() {
-                        *heat += 1;
-                    }
+                if let Ok(Heatable { active: true, heat, .. }) =
+                    game.ecs.get_mut(hit).as_deref_mut()
+                {
+                    *heat += bullet.heat;
                 }
 
+                let hit_pos: Option<Vec2> = game.ecs.get(hit).ok().as_deref().copied();
                 let (dead, _) = game.hit(HitInput {
-                    hitter_pos: pos,
+                    hitter_pos: hit_pos.unwrap_or_default() - vel,
                     hit: WeaponHit { hit },
-                    damage: fireball.damage,
-                    knockback: fireball.target_knockback,
-                    crit_chance: fireball.crit_chance,
+                    damage: bullet.damage,
+                    knockback: bullet.target_knockback,
+                    crit_chance: bullet.crit_chance,
                 });
                 if dead {
                     quests.update(game);
                 }
+
+                if let BulletBehavior::Arrow = bullet.behavior {
+                    let reflect_arrows = game
+                        .ecs
+                        .query_one_mut::<(&ReflectArrows, &Rot)>(hit)
+                        .ok()
+                        .map(|(ra, rot)| (*ra, *rot));
+                    if let Some((ReflectArrows(true), rot)) = reflect_arrows {
+                        let n = rot.vec2();
+                        let reflected = vel - 2.0 * vel.dot(n) * n;
+                        or_err!(game.ecs.despawn(bullet_ent));
+                        game.ecs.spawn({
+                            let mut r = BulletKind::Arrow.bullet(
+                                pos + 2.0 * reflected,
+                                reflected,
+                                tick,
+                                alignment,
+                            );
+                            r.bul.invincible_until_tick = tick + 10;
+                            r.vel.0 *= 3.0;
+                            r
+                        });
+                        continue;
+                    }
+
+                    if let Some(hit_pos) = hit_pos {
+                        or_err!(game
+                            .ecs
+                            .insert_one(bullet_ent, Stuck { to: hit, offset: pos - hit_pos }));
+                        or_err!(game.ecs.remove_one::<Bullet>(bullet_ent));
+                        continue;
+                    }
+                }
             }
 
-            or_err!(game.ecs.despawn(death.fireball_ent()));
+            or_err!(game.ecs.despawn(death.bullet_ent()));
         }
     }
 }
@@ -2190,7 +2339,7 @@ fn update_hero(
         .map(|mut wep| {
             let attack_kind = match wep.wep.kind {
                 WeaponKind::Sword => AttackKind::Swipe,
-                WeaponKind::Bow | WeaponKind::FireWand => AttackKind::Shoot,
+                WeaponKind::Bow(_) | WeaponKind::FireWand => AttackKind::Shoot,
             };
             wep.tick(WeaponInput {
                 start_attacking: Some(attack_kind)
@@ -2208,7 +2357,7 @@ fn update_hero(
 
             swing_ends = wep.swing_ends();
 
-            (wep.attack_hits(), wep.bullets(tick))
+            (wep.attack_hits(), wep.bullets(tick, Alignment::Hero))
         })
         .unwrap_or_default();
 
@@ -2244,7 +2393,12 @@ fn update_hero(
                 .unwrap_or(false);
 
             if added {
-                ecs.spawn((DamageLabel { tick, hp: (add_hp as i32), pos: hero_pos, for_ent: hero },));
+                ecs.spawn((DamageLabel {
+                    tick,
+                    hp: (add_hp as i32),
+                    pos: hero_pos,
+                    for_ent: hero,
+                },));
             }
         }
     }
@@ -2266,13 +2420,15 @@ fn update_hero(
     if let Some(bullet) = swing_dir
         .filter(|_| mid_swing)
         .filter(|_| rand::gen_range(0.0, 1.0) < hero_mod.fireball_chance)
-        .map(|dir| BulletKind::Fireball.bullet(hero_pos + dir + vec2(0.0, 0.5), dir, tick))
+        .map(|dir| {
+            BulletKind::Fireball.bullet(hero_pos + dir + vec2(0.0, 0.5), dir, tick, Alignment::Hero)
+        })
     {
         hero_bullets.push(bullet);
     }
 
     for bullet in hero_bullets.into_iter() {
-        knockback += bullet.rot.vec2() * bullet.dmg.attacker_knockback;
+        knockback -= bullet.rot.vec2() * bullet.bul.attacker_knockback;
         game.ecs.spawn(bullet);
     }
 
@@ -2382,7 +2538,7 @@ impl Waffle {
                 .filter(|(_, (_, _, f, ..))| f.aggroed)
                 .map(|(e, (p, v, f, h))| (e, *p, *v, *f, *h)),
         );
-        enemies.sort_by(|a, b| {
+        enemies.sort_unstable_by(|a, b| {
             if Some(a.0) == *attacker {
                 std::cmp::Ordering::Less
             } else {
@@ -2443,13 +2599,13 @@ impl Waffle {
                             speed_multiplier: 1.0,
                             tick,
                         });
-                        (wep.attack_hits(), wep.bullets(tick))
+                        (wep.attack_hits(), wep.bullets(tick, Alignment::Enemy))
                     })
                     .unwrap_or_default();
 
                 for bullet in bullets {
                     if let Ok(mut v) = game.ecs.get_mut::<Velocity>(e) {
-                        v.knockback(bullet.rot.vec2(), bullet.dmg.attacker_knockback * 0.1);
+                        v.knockback(-bullet.rot.vec2(), bullet.bul.attacker_knockback * 0.1);
                     }
                     game.ecs.spawn(bullet);
                 }
@@ -2729,7 +2885,7 @@ async fn main() {
         Health::full(10),
         Bag::default(),
     ));
-    fn chest(ecs: &mut hecs::World, pos: Vec2, items: SmallVec<[Item; 5]>) {
+    fn chest(ecs: &mut hecs::World, pos: Vec2, items: SmallVec<[Item; 5]>) -> hecs::Entity {
         ecs.spawn((
             pos,
             Art::Chest,
@@ -2738,11 +2894,14 @@ async fn main() {
             Health::full(3),
             SpillXp(15),
             SpillItems(items),
-        ));
+        ))
     }
     chest(&mut ecs, vec2(0.0, 0.0), smallvec![Item::bow(hero)]);
-    ecs.spawn((vec2(-1.0, 0.0), Art::Sword));
-    ecs.spawn((vec2(-1.0, 2.0), Art::FireWand));
+    let c = chest(&mut ecs, vec2(-7.0, 0.0), smallvec![]);
+    or_err!(ecs.insert_one(c, Health::full(10)));
+    ecs.spawn((vec2(-2.0, -0.50), Art::Sword));
+    ecs.spawn((vec2(-2.0, -0.50), Art::Arrow));
+    ecs.spawn((vec2(-2.0, -0.50), Art::Fireball));
     let fw = ecs.spawn(());
     or_err!(ecs.insert(fw, Item::fire_wand(hero).as_weapon().unwrap()));
     or_err!(ecs.insert_one(fw, PickUp::default()));
@@ -2898,7 +3057,7 @@ async fn main() {
                         goblin(
                             ecs,
                             p + vec2(3.0, 3.0) + encampment,
-                            |e| Item::bow(e),
+                            |e| Item::fire_bow(e),
                             FighterBehavior::Ranged,
                         )
                     })
@@ -2949,7 +3108,7 @@ async fn main() {
         chest(&mut ecs, p * 3.0 + vec2(3.0, 3.0) + encampment, smallvec![]);
     }
     for i in 0..3 {
-        chest(&mut ecs, encampment + vec2(2.0 + i as f32 * 1.0, i as f32 * 1.5 - 5.0), smallvec![])
+        chest(&mut ecs, encampment + vec2(2.0 + i as f32 * 1.0, i as f32 * 1.5 - 5.0), smallvec![]);
     }
     ecs.spawn((encampment + vec2(1.8, -2.5), Art::Harp));
 
@@ -2978,7 +3137,7 @@ async fn main() {
     tasks.push(Task {
         label: "Navigate to the Sword",
         req: Box::new(move |g| g.hero_dist(g.pos(sword) - vec2(0.8, 0.7)) < 1.3),
-        guide: Box::new(move |g, gi| gi.push((Art::Arrow, g.pos(sword) - vec2(0.8, 0.7)))),
+        guide: Box::new(move |g, gi| gi.push((Art::RedArrow, g.pos(sword) - vec2(0.8, 0.7)))),
         on_finish: Box::new(move |g| {
             or_err!(g.ecs.despawn(sword));
             or_err!(g.give_item(hero, Item::sword(hero)));
@@ -3080,7 +3239,7 @@ async fn main() {
         )),
     ));
     let npc2_guide =
-        move |g: &Game, gi: &mut Vec<_>| gi.push((Art::Arrow, g.pos(npc2) + vec2(0.0, 0.9)));
+        move |g: &Game, gi: &mut Vec<_>| gi.push((Art::RedArrow, g.pos(npc2) + vec2(0.0, 0.9)));
 
     let pen = Pen::new(&mut ecs, 4.5, vec2(5.0, 5.0), 10);
     let (pen_pos, pen_radius) = (pen.pos, pen.radius);
@@ -3160,7 +3319,7 @@ async fn main() {
         Task {
             label: "Enter the Pen",
             req: Box::new(move |g| g.hero_dist(pen_pos) < pen_radius * 0.8),
-            guide: Box::new(move |_, gi| gi.push((Art::Arrow, pen_pos))),
+            guide: Box::new(move |_, gi| gi.push((Art::RedArrow, pen_pos))),
             on_finish: Box::new(move |g| {
                 for &tw in &terrorworms.0 {
                     drop(g.innocent_for(tw, 1));
@@ -3470,12 +3629,7 @@ impl Game {
 
                 or_err!(self.ecs.despawn(hit));
             }
-            self.ecs.spawn((DamageLabel {
-                tick,
-                hp: -(damage as i32),
-                pos,
-                for_ent: hit,
-            },));
+            self.ecs.spawn((DamageLabel { tick, hp: -(damage as i32), pos, for_ent: hit },));
 
             (dead, (hitter_pos - pos).normalize())
         } else {
@@ -3893,25 +4047,28 @@ struct DamageLabelBin {
 }
 impl DamageLabelBin {
     fn new() -> Self {
-        Self { labels: Vec::with_capacity(100), stale: Vec::with_capacity(100), text: String::with_capacity(100) }
+        Self {
+            labels: Vec::with_capacity(100),
+            stale: Vec::with_capacity(100),
+            text: String::with_capacity(100),
+        }
     }
 
     fn update(&mut self, Game { ecs, tick, .. }: &mut Game) {
-        self.labels.extend(
-            ecs.query::<&DamageLabel>()
-                .iter()
-                .map(|(e, l)| (e, *l))
-        );
-        
+        self.labels.extend(ecs.query::<&DamageLabel>().iter().map(|(e, l)| (e, *l)));
+
         self.stale.extend(
             self.labels
                 .drain(..)
                 .filter(|(e, dl)| {
                     if *tick > dl.end_tick() {
-                        return true
+                        return true;
                     } else if dl.tick == *tick {
                         for (e2, dl2) in &mut ecs.query::<&mut DamageLabel>() {
-                            if *e < e2 && dl2.for_ent == dl.for_ent && (dl2.pos - dl.pos).length() < 1.3 {
+                            if *e < e2
+                                && dl2.for_ent == dl.for_ent
+                                && (dl2.pos - dl.pos).length() < 1.3
+                            {
                                 dl2.tick = dl.tick;
                                 dl2.hp += dl.hp;
                                 dl2.pos = dl.pos;
@@ -3922,13 +4079,12 @@ impl DamageLabelBin {
 
                     false
                 })
-                .map(|(e, _)| e)
+                .map(|(e, _)| e),
         );
 
         for e in self.stale.drain(..) {
             or_err!(ecs.despawn(e));
         }
-
     }
 
     fn draw(&mut self, Game { ecs, tick: game_tick, .. }: &Game, cam: &Camera2D) {
@@ -4047,7 +4203,9 @@ impl Drawer {
                     from.cmplt(screen_size + bound).all() && from.cmpgt(-bound).all()
                 }),
         );
-        sprites.sort_by(|a, b| float_cmp(b, a, |(pos, art, z, ..)| pos.y() + art.z_offset() + z.0));
+        sprites.sort_unstable_by(|a, b| {
+            float_cmp(b, a, |(pos, art, z, ..)| pos.y() + art.z_offset() + z.0)
+        });
         for (pos, art, _, rot, scale, heat) in sprites.drain(..) {
             let push_model_matrix = |gl: &mut QuadGl| {
                 gl.push_model_matrix(
@@ -4064,6 +4222,37 @@ impl Drawer {
                 draw_rectangle(x - w / 2.0, y, w, h, color);
             };
 
+            fn arrow(x: f32) {
+                for &f in &[1.0, -1.0] {
+                    draw_triangle(
+                        vec2(0.35 + x, 0.01 * f),
+                        vec2(0.2 + x, 0.12 * f),
+                        vec2(0.0 + x, 0.12 * f),
+                        RED,
+                    );
+                    draw_triangle(
+                        vec2(0.35 + x, 0.01 * f),
+                        vec2(0.05 + x, 0.01 * f),
+                        vec2(0.0 + x, 0.12 * f),
+                        RED,
+                    );
+                }
+
+                draw_line(0.8 + x, 0.0, 0.05 + x, 0.0, 0.08, DARKBROWN);
+                draw_triangle(
+                    vec2(1.09 + x, 0.0),
+                    vec2(0.85 + x, -0.105),
+                    vec2(0.85 + x, 0.105),
+                    GRAY,
+                );
+                draw_triangle(
+                    vec2(0.725 + x, 0.0),
+                    vec2(0.850 + x, -0.105),
+                    vec2(0.850 + x, 0.105),
+                    GRAY,
+                );
+            }
+
             match art {
                 Art::Hero => rect(BLUE, 1.0, 1.0),
                 Art::Scarecrow => rect(GOLD, 0.8, 0.8),
@@ -4071,19 +4260,30 @@ impl Drawer {
                 Art::VioletVagabond => rect(VIOLET, 0.8, 0.8),
                 Art::Goblin => rect(DARKGREEN, 0.6, 0.6),
                 Art::Npc => rect(GREEN, 1.0, GOLDEN_RATIO),
-                Art::Bow(r) => {
+                Art::FireBow(r) | Art::Bow(r) => {
                     push_model_matrix(gl);
-                    draw_line(-0.1, -1.0, -0.1 - r * 0.3, 0.0, 0.035, LIGHTGRAY);
-                    draw_line(-0.1, 1.0, -0.1 - r * 0.3, 0.0, 0.035, LIGHTGRAY);
+                    let (body, string) = match art {
+                        Art::FireBow(_) => (DARKGRAY, Color([150, 50, 0, 255])),
+                        _ => (BROWN, LIGHTGRAY),
+                    };
 
-                    draw_line(-0.10, -1.0, 0.03, -1.1, 0.045, BROWN);
-                    draw_line(-0.10, -1.0, 0.2, -0.4, 0.105, BROWN);
-                    draw_line(0.25, -0.1, 0.2, -0.4, 0.095, BROWN);
-                    draw_line(0.25, -0.1, 0.1, 0.0, 0.075, BROWN);
-                    draw_line(0.25, 0.1, 0.1, 0.0, 0.075, BROWN);
-                    draw_line(0.25, 0.1, 0.2, 0.4, 0.095, BROWN);
-                    draw_line(-0.10, 1.0, 0.2, 0.4, 0.105, BROWN);
-                    draw_line(-0.10, 1.0, 0.03, 1.1, 0.045, BROWN);
+                    draw_line(-0.1, -1.0, -0.1 - r * 0.3, 0.0, 0.035, string);
+                    draw_line(-0.1, 1.0, -0.1 - r * 0.3, 0.0, 0.035, string);
+
+                    if let Art::Bow(r) = art {
+                        if r > 0.0 {
+                            arrow(-r);
+                        }
+                    }
+
+                    draw_line(-0.10, -1.0, 0.03, -1.1, 0.045, body);
+                    draw_line(-0.10, -1.0, 0.2, -0.4, 0.105, body);
+                    draw_line(0.25, -0.1, 0.2, -0.4, 0.095, body);
+                    draw_line(0.25, -0.1, 0.1, 0.0, 0.075, body);
+                    draw_line(0.25, 0.1, 0.1, 0.0, 0.075, body);
+                    draw_line(0.25, 0.1, 0.2, 0.4, 0.095, body);
+                    draw_line(-0.10, 1.0, 0.2, 0.4, 0.105, body);
+                    draw_line(-0.10, 1.0, 0.03, 1.1, 0.045, body);
                     gl.pop_model_matrix();
                 }
                 Art::Harp => {
@@ -4186,9 +4386,8 @@ impl Drawer {
                         color.0[2] = 20 + 30 * (i as f32 / 5.0) as u8;
                         color.0[3] = 40 + 53 * ((5 - i) as f32 / 5.0) as u8;
                         draw_circle(
-                            w / -2.0 + i as f32 / 8.0 + q as f32 / 85.0,
-                            ((tick + q * 4) as f32 / 5.0).sin() * (i as f32 / 4.5).max(0.05) * 0.25
-                                - w / 2.0,
+                            w / -2.0 - i as f32 / 8.0 - q as f32 / 85.0,
+                            ((tick + q * 4) as f32 / 5.0).sin() * (i as f32 / 4.5).max(0.05) * 0.25,
                             w,
                             color,
                         );
@@ -4196,6 +4395,11 @@ impl Drawer {
                     gl.pop_model_matrix();
                 }
                 Art::Arrow => {
+                    push_model_matrix(gl);
+                    arrow(-1.09);
+                    gl.pop_model_matrix();
+                }
+                Art::RedArrow => {
                     push_model_matrix(gl);
                     draw_triangle(vec2(0.11, 0.0), vec2(-0.11, 0.0), vec2(0.00, GOLDEN_RATIO), RED);
                     draw_triangle(
@@ -4208,15 +4412,12 @@ impl Drawer {
                 }
                 Art::FireWand => {
                     push_model_matrix(gl);
-                    draw_line(   0.235, 1.20,
-                                -0.010, 0.25, 0.06, DARKGRAY);
-                    draw_line(   0.235, 1.20,
-                                -0.065, 0.55, 0.05, DARKGRAY);
-                    draw_line(  -0.140, 1.30,
-                                -0.010, 0.25, 0.10, DARKGRAY);
-                    draw_poly(   0.05 , 1.15, 5, 0.18, 0.0, DARKGRAY);
-                    draw_circle( 0.05 , 1.15, 0.11, RED);
-                    draw_circle( 0.05 , 1.15, 0.08 * (tick as f32 / 20.0).sin(), BLACK);
+                    draw_line(0.235, 1.20, -0.010, 0.25, 0.06, DARKGRAY);
+                    draw_line(0.235, 1.20, -0.065, 0.55, 0.05, DARKGRAY);
+                    draw_line(-0.140, 1.30, -0.010, 0.25, 0.10, DARKGRAY);
+                    draw_poly(0.05, 1.15, 5, 0.18, 0.0, DARKGRAY);
+                    draw_circle(0.05, 1.15, 0.11, RED);
+                    draw_circle(0.05, 1.15, 0.08 * (tick as f32 / 20.0).sin(), BLACK);
                     /*
                     draw_poly(-0.1, 0.76, 5, 0.18, 0.0, DARKGRAY);
                     draw_circle(-0.1, 0.76, 0.11, RED);
