@@ -1349,10 +1349,12 @@ enum Art {
     Consumable(Consumable),
     Trinket(Trinket),
     Fireball,
+    Circle(f32, Color),
     Harp,
     FireBow(f32),
     Bow(f32),
     Xp,
+    BigLog,
     Compass,
     Scarecrow,
     RedArrow,
@@ -1383,6 +1385,7 @@ impl Art {
             Art::Hero => "Hero",
             Art::Consumable(c) => c.name(),
             Art::Trinket(t) => t.name(),
+            Art::Circle(_, _) => "Circle",
             Art::Fireball => "Fireball",
             Art::Arrow => "Arrow",
             Art::Xp => "Xp",
@@ -1390,6 +1393,7 @@ impl Art {
             Art::Goblin => "Goblin",
             Art::RedArrow => "Red Arrow",
             Art::Chest => "Chest",
+            Art::BigLog => "Big Log",
             Art::Harp => "Harp",
             Art::FireBow(_) => "Fire Bow",
             Art::Bow(_) => "Bow",
@@ -1420,7 +1424,8 @@ impl Art {
             | Art::FireBow(_)
             | Art::Bow(_) => 0.4,
             Art::Goblin => 0.3,
-            Art::Tree => 2.0,
+            Art::Circle(r, _) => r,
+            Art::Tree | Art::BigLog => 2.0,
             Art::Post => 1.05,
             Art::Trinket(_) | Art::Consumable(_) => 0.0,
         }
@@ -2872,11 +2877,8 @@ async fn main() {
     let mut keeper_of_bags = KeeperOfBags::new();
     let mut fps = Fps::new();
 
-    let npc =
-        |npc_pos, npc| (npc_pos, npc, Phys::new().wings(0.3, 0.21, CircleKind::Push), Art::Npc);
-
     let hero = ecs.spawn((
-        vec2(-0.4, -3.4),
+        vec2(0.0, 0.0),
         Velocity::default(),
         Phys::new().wings(0.3, 0.21, CircleKind::Push).hitbox(0.5),
         Art::Hero,
@@ -2884,550 +2886,55 @@ async fn main() {
         Health::full(10),
         Bag::default(),
     ));
-    fn chest(ecs: &mut hecs::World, pos: Vec2, items: SmallVec<[Item; 5]>) -> hecs::Entity {
-        ecs.spawn((
-            pos,
-            Art::Chest,
-            Phys::new().wings(0.325, 0.325, CircleKind::Push).wings(0.325, 0.325, CircleKind::Hit),
-            Velocity::default(),
-            Health::full(3),
-            SpillXp(15),
-            SpillItems(items),
-        ))
-    }
-    chest(&mut ecs, vec2(0.0, 0.0), smallvec![Item::bow(hero)]);
-    let c = chest(&mut ecs, vec2(-7.0, 0.0), smallvec![]);
-    or_err!(ecs.insert_one(c, Health::full(10)));
-    ecs.spawn((vec2(-2.0, -0.50), Art::Sword));
-    ecs.spawn((vec2(-2.0, -0.50), Art::Arrow));
-    ecs.spawn((vec2(-2.0, -0.50), Art::Fireball));
-    let fw = ecs.spawn(());
-    or_err!(ecs.insert(fw, Item::fire_wand(hero).as_weapon().unwrap()));
-    or_err!(ecs.insert_one(fw, PickUp::default()));
 
-    type Post = (Vec2, Art, Phys);
-    #[derive(Clone, Copy)]
-    struct Pen {
-        gate: [(hecs::Entity, Post); 2],
-        pos: Vec2,
+    #[derive(miniserde::Serialize, miniserde::Deserialize, Debug)]
+    struct MapCircleCollider {
+        pos: (f32, f32),
         radius: f32,
     }
-    impl Pen {
-        fn new(ecs: &mut hecs::World, radius: f32, pos: Vec2, gate: usize) -> Self {
-            let mut pen =
-                Self { gate: unsafe { [std::mem::zeroed(), std::mem::zeroed()] }, radius, pos };
 
-            for (i, post_pos) in circle_points((PI * radius / 0.4).ceil() as usize).enumerate() {
-                let post = pen.post(post_pos);
-                let e = ecs.spawn(post.clone());
+    #[derive(miniserde::Serialize, miniserde::Deserialize, Debug)]
+    struct Map {
+        trees: Vec<(f32, f32)>,
+        circles: Vec<MapCircleCollider>,
+    }
+    let Map { trees, circles } = miniserde::json::from_str(
+        &String::from_utf8(load_file("./map.json").await.unwrap()).unwrap(),
+    )
+    .unwrap();
 
-                let gate_i = i - gate;
-                if gate_i <= 1 {
-                    pen.gate[gate_i] = (e, post);
-                }
-            }
+    for (x, y) in trees.into_iter() {
+        ecs.spawn((vec2(y, -x - 0.4), Art::Tree));
 
-            pen
-        }
-
-        fn post(&self, post_pos: Vec2) -> Post {
-            (post_pos * self.radius + self.pos, Art::Post, Phys::new().pushbox(0.4))
-        }
-
-        fn gate_open(&self, ecs: &mut hecs::World) {
-            for (e, _) in self.gate.iter() {
-                or_err!(ecs.remove::<(Phys, Art)>(*e));
-            }
-        }
-
-        fn gate_close(&self, ecs: &mut hecs::World) {
-            for (e, c) in self.gate.iter() {
-                or_err!(ecs.insert(*e, c.clone()));
-            }
-        }
+        let shadow_r = 0.82;
+        ecs.spawn((
+            vec2(y - 0.1, -x - shadow_r + 0.1),
+            Art::Circle(shadow_r, Color([45, 110, 92, 255])),
+            ZOffset(1000.0),
+        ));
     }
 
-    fn tree(ecs: &mut hecs::World, p: Vec2) {
-        ecs.spawn((p, Art::Tree, Phys::new().pushbox(0.4)));
-    }
-    for p in circle_points(5) {
-        tree(&mut ecs, p * 6.0 + vec2(-21.5, -20.0));
-    }
-    for p in circle_points(8) {
-        tree(&mut ecs, p * 18.0 + vec2(-21.5, -20.0));
-    }
-    for p in circle_points(6) {
-        tree(&mut ecs, p * 11.0 + vec2(5.0, 5.0));
-    }
-    for p in circle_points(8) {
-        tree(&mut ecs, p * 13.5 + vec2(-40.0, 10.0));
+    for MapCircleCollider { pos: (x, y), radius } in circles.into_iter() {
+        ecs.spawn((vec2(y, -x - radius), Phys::new().pushbox(radius)));
     }
 
-    let vv = ecs.reserve_entity();
-    or_err!(ecs.insert(
-        vv,
-        (
-            vec2(-21.5, -20.0),
-            Health::full(7),
-            HealthBar,
-            Art::VioletVagabond,
-            SpillXp(50),
-            Fighter {
-                behavior: FighterBehavior::LowHealthStab,
-                chase_speed: 0.0085,
-                charge_speed: 0.0125,
-                attack_interval: 75,
-                ..Default::default()
-            },
-            Phys::new().pushfoot_bighit(),
-            Velocity::default(),
-            Bag::holding(Item::sword(vv)),
-        )
-    ));
-
-    struct Goblins {
-        patrol: Vec<hecs::Entity>,
-        reserve: Vec<hecs::Entity>,
-        ranged: Vec<hecs::Entity>,
-        encampment: Vec2,
-        patrol_distance: f32,
-        aggroed: bool,
-    }
-    impl Goblins {
-        fn new(ecs: &mut hecs::World, encampment: Vec2) -> Self {
-            let patrol_distance = 10.0;
-            fn goblin(
-                ecs: &mut hecs::World,
-                p: Vec2,
-                f: impl FnOnce(hecs::Entity) -> Item,
-                behavior: FighterBehavior,
-            ) -> hecs::Entity {
-                let goblin = ecs.reserve_entity();
-                or_err!(ecs.insert(
-                    goblin,
-                    (
-                        p,
-                        Health::full(4),
-                        HealthBar,
-                        Art::Goblin,
-                        SpillXp(10),
-                        Fighter {
-                            behavior,
-                            chase_speed: 0.0045,
-                            charge_speed: 0.0065,
-                            chase_distance: 50.0,
-                            attack_interval: 60,
-                            ..Default::default()
-                        },
-                        Phys::new().insert(Circle::push(0.2, vec2(0.0, 0.1))).hitbox(0.3),
-                        Velocity::default(),
-                        Bag::holding(f(goblin)),
-                    )
-                ));
-                goblin
-            };
-
-            Self {
-                encampment,
-                aggroed: false,
-                patrol_distance,
-                patrol: circle_points(4)
-                    .map(|p| {
-                        goblin(
-                            ecs,
-                            p * patrol_distance + encampment,
-                            |e| Item::sword(e),
-                            FighterBehavior::SwingAlways,
-                        )
-                    })
-                    .collect(),
-                reserve: circle_points(3)
-                    .map(|p| {
-                        goblin(
-                            ecs,
-                            p + vec2(-3.0, 3.0) + encampment,
-                            |e| Item::sword(e),
-                            FighterBehavior::SwingAlways,
-                        )
-                    })
-                    .collect(),
-                ranged: circle_points(3)
-                    .map(|p| {
-                        goblin(
-                            ecs,
-                            p + vec2(3.0, 3.0) + encampment,
-                            |e| Item::fire_bow(e),
-                            FighterBehavior::Ranged,
-                        )
-                    })
-                    .collect(),
-            }
-        }
-
-        fn update(&mut self, ecs: &mut hecs::World) {
-            let mut goal: Vec2 = self
-                .patrol
-                .last()
-                .and_then(|&e| ecs.get(e).ok().as_deref().copied())
-                .unwrap_or(self.encampment);
-
-            for &ent in &self.patrol {
-                if let Ok((&pos, Velocity(vel))) = ecs.query_one_mut::<(&Vec2, &mut _)>(ent) {
-                    if !self.aggroed {
-                        let camp_delta = pos - self.encampment;
-                        if camp_delta.length() < self.patrol_distance {
-                            *vel += camp_delta.normalize()
-                                * (camp_delta.length() - self.patrol_distance).abs().min(0.0045);
-                        }
-                        *vel += (goal - pos).normalize() * 0.0015;
-                        goal = pos;
-                    }
-                }
-            }
-
-            for &ent in self.reserve.iter().chain(&self.ranged).chain(&self.patrol) {
-                if let Ok(mut fighter) = ecs.get_mut::<Fighter>(ent) {
-                    self.aggroed = fighter.aggroed || self.aggroed;
-                    fighter.aggroed = fighter.aggroed || self.aggroed;
-                }
-            }
-        }
-    }
-
-    let encampment = vec2(35.5, -3.0);
-    for p in circle_points(7) {
-        tree(&mut ecs, p * 8.0 + encampment)
-    }
-    for p in circle_points(8) {
-        tree(&mut ecs, p * 15.0 + encampment)
-    }
-    let mut goblins = Goblins::new(&mut ecs, encampment);
-
-    for p in circle_points(7) {
-        chest(&mut ecs, p * 3.0 + vec2(3.0, 3.0) + encampment, smallvec![]);
-    }
-    for i in 0..3 {
-        chest(&mut ecs, encampment + vec2(2.0 + i as f32 * 1.0, i as f32 * 1.5 - 5.0), smallvec![]);
-    }
-    ecs.spawn((encampment + vec2(1.8, -2.5), Art::Harp));
-
-    let lair_pen = Pen::new(&mut ecs, 8.0, vec2(-40.0, 10.0), 52);
-    lair_pen.gate_open(&mut ecs);
+    let big_log_pos = vec2(2.5, 4.0);
+    ecs.spawn((big_log_pos, Art::BigLog, Phys::new().wings(0.8, 0.8, CircleKind::Push)));
 
     let mut tasks = vec![];
-
-    let sword = ecs.spawn((vec2(-2.5, -0.4), Art::Sword, Rot(FRAC_PI_2 + 0.1), ZOffset(0.42)));
-
-    let npc1 = ecs.spawn(npc(
-        vec2(-4.0, 0.0),
-        Npc::new("NPC 1").with_paragraph(concat!(
-            "It's dangerous to go alone! \n",
-            "Allow me to give you, a complete \n",
-            "stranger, a dangerous weapon \n",
-            "because I just happen to believe \n",
-            "that you may be capable and willing \n",
-            "to spare us from the horrible fate \n",
-            "that will surely befall us regardless \n",
-            "of whether or not you spend three hours \n",
-            "immersed in a fishing minigame.",
-        )),
-    ));
-
     tasks.push(Task {
         label: "Navigate to the Sword",
-        req: Box::new(move |g| g.hero_dist(g.pos(sword) - vec2(0.8, 0.7)) < 1.3),
-        guide: Box::new(move |g, gi| gi.push((Art::RedArrow, g.pos(sword) - vec2(0.8, 0.7)))),
-        on_finish: Box::new(move |g| {
-            or_err!(g.ecs.despawn(sword));
-            or_err!(g.give_item(hero, Item::sword(hero)));
-            if let Ok(mut npc) = g.ecs.get_mut::<Npc>(npc1) {
-                npc.ui(|ui, _| {
-                    paragraph(
-                        ui,
-                        concat!(
-                            "I'm going to have to ask you to \n",
-                            "ruthlessly destroy a scarecrow I \n",
-                            "painstakingly made from scratch \n",
-                            "over the course of several days \n",
-                            "because this game takes place \n",
-                            "before modern manufacturing practices, \n",
-                            "but it's fine because it's not \n",
-                            "like I have anything else to do other \n",
-                            "than stand here pretending to work on \n",
-                            "another one!",
-                        ),
-                    )
-                });
+        req: Box::new(move |g| g.hero_dist(big_log_pos + vec2(0.0, 1.8)) < 0.8),
+        guide: Box::new(move |g, gi| {
+            if g.tick > 300 {
+                gi.push((Art::RedArrow, big_log_pos + vec2(0.0, 1.8)))
             }
         }),
         ..Default::default()
     });
-
-    let scarecrow = ecs.spawn((
-        vec2(3.4, -2.4),
-        Phys::new().pushfoot_bighit(),
-        Health::full(5),
-        HealthBar,
-        Art::Scarecrow,
-        SpillXp(3),
-    ));
-
-    tasks.push(Task {
-        label: "Destroy Scarecrow",
-        req: Box::new(move |g| g.dead(scarecrow)),
-        guide: Box::new(move |g, gi| gi.push((Art::Sword, g.pos(scarecrow)))),
-        on_finish: Box::new({
-            use {Consumable::*, Trinket::*};
-
-            #[rustfmt::skip]
-            let mut reward = RewardChoice::new(hash!(), &[
-                (Item::Consumable(HealthPotion), 5, "x5 Health Potions", Some(concat!(
-                    "40 hitpoints worth of regeneration. \n",
-                    "You have 10 hitpoints currently. \n",
-                ))),
-                (Item::Trinket(StoneRing), 1, "Stone Ring", None),
-            ]);
-
-            move |g| {
-                if let Ok(mut npc) = g.ecs.get_mut::<Npc>(npc1) {
-                    npc.ui(move |ui, g| {
-                        paragraph(
-                            ui,
-                            concat!(
-                                "As you have proven yourself \n",
-                                "capable of obliterating inanimate \n",
-                                "objects which are rarely fearsome \n",
-                                "enough even to repel birds \n",
-                                "characterized by their extreme \n",
-                                "cowardice, any doubts I may have \n",
-                                "had as to your ability to save us \n",
-                                "from inescapable doom are certainly \n",
-                                "assuaged. Allow me to award you with \n",
-                                "some token of my appreciation. \n",
-                            ),
-                        );
-
-                        for item in reward.ui(ui).into_iter() {
-                            or_err!(g.give_item(hero, item));
-                        }
-
-                        paragraph(
-                            ui,
-                            concat!(
-                                "I urge you to talk to NPC 2, who will \n",
-                                "open the gate for you. Once inside \n",
-                                "the pen, attempt to slaughter the \n",
-                                "innocent looking creatures inside. \n",
-                                "Show no remorse, adventurer. Soon \n",
-                                "our plight will be known to you.",
-                            ),
-                        )
-                    });
-                }
-            }
-        }),
-        ..Default::default()
-    });
-
-    let npc2 = ecs.spawn(npc(
-        vec2(4.0, 11.0),
-        Npc::new("NPC 2").with_paragraph(concat!(
-            "Greetings! \n",
-            "I can open this gate for you, \n",
-            "but you don't look ready. \n",
-        )),
-    ));
-    let npc2_guide =
-        move |g: &Game, gi: &mut Vec<_>| gi.push((Art::RedArrow, g.pos(npc2) + vec2(0.0, 0.9)));
-
-    let pen = Pen::new(&mut ecs, 4.5, vec2(5.0, 5.0), 10);
-    let (pen_pos, pen_radius) = (pen.pos, pen.radius);
-    #[derive(Copy, Clone)]
-    struct Terrorworms([hecs::Entity; 6]);
-    impl Terrorworms {
-        fn new(ecs: &mut hecs::World, pen: Pen) -> Self {
-            let r = pen.radius * 0.4;
-            let mut circle = circle_points(6);
-            Terrorworms([(); 6].map(|_| {
-                ecs.spawn((
-                    circle.next().unwrap() * r * 0.3 + pen.pos,
-                    Art::TripletuftedTerrorworm,
-                    Wander::around(pen.pos, r),
-                    Velocity::default(),
-                    Innocence::Unwavering,
-                    Phys::new().pushfoot_bighit(),
-                    Health::full(1),
-                    SpillXp(4),
-                ))
-            }))
-        }
-
-        fn living<'a>(&'a self, g: &'a Game) -> impl Iterator<Item = hecs::Entity> + 'a {
-            self.0.iter().copied().filter(move |&e| !g.dead(e))
-        }
-
-        fn dead<'a>(&'a self, g: &'a Game) -> impl Iterator<Item = hecs::Entity> + 'a {
-            self.0.iter().copied().filter(move |&e| g.dead(e))
-        }
-
-        fn guides<'a>(&'a self, g: &'a Game) -> impl Iterator<Item = (Art, Vec2)> + 'a {
-            self.living(g).map(move |e| (Art::Sword, g.pos(e)))
-        }
-
-        /// Note: now all of the entities are invalid, only do this
-        /// when all the existing ones are dead, you want 6 more, and
-        /// you won't be fiddling with them after this.
-        fn refill(&self, g: &mut Game, pen: Pen) {
-            Self::new(&mut g.ecs, pen);
-        }
-    }
-    let terrorworms = Terrorworms::new(&mut ecs, pen);
-
-    tasks.append(&mut vec![
-        Task {
-            label: "Talk to NPC 2",
-            req: Box::new(move |g| g.hero_dist_ent(npc2) < 1.3),
-            guide: Box::new(npc2_guide),
-            on_finish: Box::new(move |g| {
-                if let Ok(mut npc) = g.ecs.get_mut::<Npc>(npc2) {
-                    npc.ui(|ui, _| {
-                        paragraph(
-                            ui,
-                            concat!(
-                                "Oh, adventurer, \n",
-                                "I'm so glad you've come along! \n",
-                                "In fact, it's almost like I've \n",
-                                "just been standing here since \n",
-                                "the dawn of time itself, waiting \n",
-                                "for someone to come help me. In fact, \n",
-                                "it's almost as if I was created simply \n",
-                                "to give you something to do. \n",
-                                "\n",
-                                "In this pen are the last \n",
-                                "Tripletufted Terrorworms known to exist, \n",
-                                "and I need you to forgo your conscience \n",
-                                "and simply slaughter them: no remorse."
-                            ),
-                        )
-                    });
-                }
-                pen.gate_open(&mut g.ecs)
-            }),
-            ..Default::default()
-        },
-        Task {
-            label: "Enter the Pen",
-            req: Box::new(move |g| g.hero_dist(pen_pos) < pen_radius * 0.8),
-            guide: Box::new(move |_, gi| gi.push((Art::RedArrow, pen_pos))),
-            on_finish: Box::new(move |g| {
-                for &tw in &terrorworms.0 {
-                    drop(g.innocent_for(tw, 1));
-                }
-                pen.gate_close(&mut g.ecs)
-            }),
-            ..Default::default()
-        },
-        Task {
-            label: "Slaughter the first one",
-            req: Box::new(move |g| terrorworms.dead(g).count() == 1),
-            guide: Box::new(move |g, gi| gi.extend(terrorworms.guides(g))),
-            on_finish: Box::new(move |g| {
-                for &tw in &terrorworms.0 {
-                    drop(g.innocent_for(tw, 10));
-                    if let Ok(Wander { goal, speed, .. }) = g.ecs.get_mut(tw).as_deref_mut() {
-                        *goal = rand_vec2() * pen_radius + pen_pos;
-                        *speed *= 2.5;
-                    }
-                }
-            }),
-            ..Default::default()
-        },
-        Task {
-            label: "Shit boutta get real",
-            req: Box::new(move |g| terrorworms.dead(g).count() == 2),
-            guide: Box::new(move |g, gi| gi.extend(terrorworms.guides(g))),
-            on_finish: Box::new(move |g| {
-                for &tw in &terrorworms.0 {
-                    drop(g.innocent_for(tw, 10));
-                    drop(g.ecs.remove_one::<Wander>(tw));
-                    drop(g.ecs.insert(
-                        tw,
-                        (
-                            Fighter {
-                                chase_speed: 0.0035,
-                                charge_speed: 0.0055,
-                                attack_interval: 140,
-                                aggroed: true,
-                                ..Default::default()
-                            },
-                            Bag::holding(Item::sword(tw)),
-                            Health::full(2),
-                            SpillXp(8),
-                            HealthBar,
-                        ),
-                    ));
-                }
-            }),
-            ..Default::default()
-        },
-        Task {
-            label: "Kill them all!",
-            req: Box::new(move |g| terrorworms.living(g).count() == 0),
-            on_finish: Box::new(move |g| pen.gate_open(&mut g.ecs)),
-            ..Default::default()
-        },
-        Task {
-            label: "Exit the Pen",
-            req: Box::new(move |g| g.hero_dist(pen_pos) > pen_radius * 1.2),
-            guide: Box::new(npc2_guide),
-            on_finish: Box::new({
-                use Trinket::*;
-                #[rustfmt::skip]
-                let mut reward = RewardChoice::new(hash!(), &[
-                    (Item::Trinket(VolcanicShard), 1, "Volcanic Shard", None),
-                    (Item::Trinket(LoftyInsoles), 1, "Lofty Insoles", None),
-                ]);
-
-                move |g| {
-                    terrorworms.refill(g, pen);
-                    pen.gate_close(&mut g.ecs);
-                    if let Ok(mut npc) = g.ecs.get_mut::<Npc>(npc2) {
-                        npc.ui(move |ui, g| {
-                            paragraph(
-                                ui,
-                                concat!(
-                                    "Your admirable conduct has confirmed our \n",
-                                    "prophecies! Please, take a trinket!\n",
-                                ),
-                            );
-
-                            for item in reward.ui(ui).into_iter() {
-                                or_err!(g.give_item(hero, item));
-                            }
-
-                            paragraph(
-                                ui,
-                                concat!(
-                                    "The slaughtered Tripletufted Terrorworms \n",
-                                    "have simply returned. They will continue \n",
-                                    "to grow in number until this pen, \n",
-                                    "and eventually our simple way of life, \n",
-                                    "is consumed by them. It is fortold that the \n",
-                                    "only way we can stop them is by forging the \n",
-                                    "Honeycoated Heptahorn.\n",
-                                ),
-                            );
-                        });
-                    }
-                }
-            }),
-            ..Default::default()
-        },
-    ]);
-
     quests.add(Quest {
-        title: "RPG Tropes I",
-        completion_quip: "Try not to poke your eye out, like the last adventurer ...",
+        title: "Rocky & The Forest Creatures",
+        completion_quip: "Yes, all quest names should sound like band names.",
         completion: QuestCompletion::Accepted { on_tick: 0 },
         tasks,
         ..Default::default()
@@ -3461,8 +2968,6 @@ async fn main() {
             levels.update(&mut game);
             levels.update_icon(&mut game, &drawer);
             wander(&mut game.ecs);
-
-            goblins.update(&mut game.ecs);
 
             update_hero(hero, &mut game, &mut quests, &mut bag_ui, &mut levels);
 
@@ -4166,16 +3671,9 @@ impl Drawer {
             set_camera(*cam);
         }
 
-        clear_background(Color([180, 227, 245, 255]));
-        fn road_through(p: Vec2, slope: Vec2) {
-            let ((sx, sy), (ex, ey)) = ((-slope + p).into(), (slope + p).into());
-            draw_line(sx, sy, ex, ey, 3.2, Color([160, 160, 160, 255]));
-        }
-        draw_line(-20.0, -20.0, -40.0, 10.0, 2.2, Color([165, 165, 165, 255]));
-        draw_line(0.0, -10.0, 35.0, -3.0, 2.2, Color([165, 165, 165, 255]));
-        draw_line(0.3, -9.98, -15.0, -10.0, 2.2, Color([165, 165, 165, 255]));
-        road_through(-vec2(20.0, 20.0), vec2(180.0, 420.0));
-        //road_through(vec2(-15.0, -15.0), vec2(35.5, -3.0) * 2.0);
+        //clear_background(Color([180, 245, 227, 255]));
+        //clear_background(Color([105, 170, 152, 255]));
+        clear_background(Color([65, 130, 112, 255]));
 
         #[cfg(feature = "show-culling")]
         {
@@ -4259,6 +3757,9 @@ impl Drawer {
                 Art::VioletVagabond => rect(VIOLET, 0.8, 0.8),
                 Art::Goblin => rect(DARKGREEN, 0.6, 0.6),
                 Art::Npc => rect(GREEN, 1.0, GOLDEN_RATIO),
+                Art::Circle(r, color) => {
+                    draw_circle(x, y + r, r, color);
+                }
                 Art::FireBow(r) | Art::Bow(r) => {
                     push_model_matrix(gl);
                     let (body, string) = match art {
@@ -4353,14 +3854,33 @@ impl Drawer {
                         LIGHTGRAY,
                     );
                 }
+                Art::BigLog => {
+                    let (w, h) = (3.0, 2.0);
+                    draw_rectangle(x - w / 2.0, y, w, h, BROWN);
+                    draw_circle(x - w / 2.0, y + h / 2.0, h / 2.0, BROWN);
+                    draw_circle(x + w / 2.0, y + h / 2.0, h / 2.0, BROWN);
+
+                    draw_circle(x - w / 2.0, y + h / 2.0, h / 2.0 * 0.8, BEIGE);
+                    draw_circle(x - w / 2.0, y + h / 2.0, h / 2.0 * 0.6, DARKBROWN);
+                }
                 Art::Tree => {
                     let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
                     draw_circle(x, y + r, r, BROWN);
                     draw_rectangle(x - w / 2.0, y + r, w, h, BROWN);
-                    draw_circle(x + 0.80, y + 2.2, 0.8, DARKGREEN);
-                    draw_circle(x + 0.16, y + 3.0, 1.0, DARKGREEN);
-                    draw_circle(x - 0.80, y + 2.5, 0.9, DARKGREEN);
-                    draw_circle(x - 0.16, y + 2.0, 0.8, DARKGREEN);
+                    let mut color = DARKGREEN;
+                    draw_circle(x + 0.80, y + 2.2, 0.8, color);
+                    color.0[0] += 10;
+                    color.0[1] += 10;
+                    color.0[2] += 10;
+                    draw_circle(x + 0.16, y + 3.0, 1.0, color);
+                    color.0[0] += 10;
+                    color.0[1] += 10;
+                    color.0[2] += 10;
+                    draw_circle(x - 0.80, y + 2.5, 0.9, color);
+                    color.0[0] += 10;
+                    color.0[1] += 10;
+                    color.0[2] += 10;
+                    draw_circle(x - 0.16, y + 2.0, 0.8, color);
                 }
                 Art::Post => {
                     let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
