@@ -21,15 +21,24 @@ with open('./map.json', 'w') as fp:
     };
     
     splines = [
-        "rocky_enter", "rocky_hide", "rocky_bounce1", "rocky_bounce2",
+        "rocky_enter", "rocky_hide", "rocky_leave",
+            "rocky_bounce1", "rocky_bounce2",
         "melee_enter", "ranged_enter",
     ]
     
     for spline in splines:
-        o[spline] = [
-            [ p.co[:2] for p in o.data.splines[0].points ]
+        bps = [
+            o.data.splines[0].bezier_points
                 for o in bpy.data.objects
                 if o.name == spline
         ][0]
+        o[spline] = [
+            {
+                'left': bp.handle_left[:2],
+                'pos': bp.co[:2],
+                'right': bp.handle_right[:2]
+            }
+                for bp in bps
+        ]
     
     json.dump(o, fp)

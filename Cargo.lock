@@ -205,6 +205,7 @@ source = "git+https://github.com/not-fl3/macroquad#2201de8042c3a7047b039e7f6a646
 [[package]]
 name = "megaui"
 version = "0.2.14"
+source = "git+https://github.com/cedric-h/megaui.git?branch=last_item#af008f56596de73e33f34133cfa215f3a5583d23"
 dependencies = [
  "miniquad_text_rusttype",
 ]

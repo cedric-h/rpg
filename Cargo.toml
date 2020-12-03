@@ -21,4 +21,5 @@ static_type_map = "0.1.2"
 
 [patch.crates-io]
 macroquad = { git = "https://github.com/not-fl3/macroquad", features = ["log-impl"] }
-megaui = { path = "../megaui" }
+megaui = { git = "https://github.com/cedric-h/megaui.git", branch = "last_item" }
+# megaui = { path = "../megaui" }
