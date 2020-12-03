@@ -17,6 +17,7 @@ megaui-macroquad =  { git = "https://github.com/not-fl3/megaui-macroquad" }
 fxhash = "0.2.1"
 smallvec = "1.4.2"
 miniserde = "0.1.13"
+static_type_map = "0.1.2"
 
 [patch.crates-io]
 macroquad = { git = "https://github.com/not-fl3/macroquad", features = ["log-impl"] }

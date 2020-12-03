@@ -6,6 +6,7 @@ use macroquad::prelude::*;
 #[allow(dead_code)]
 mod math;
 use smallvec::{smallvec, SmallVec};
+use static_type_map::StaticTypeMap;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use megaui_macroquad::{
@@ -41,15 +42,20 @@ fn float_cmp<T>(a: T, b: T, mut f: impl FnMut(T) -> f32) -> std::cmp::Ordering {
     f(a).partial_cmp(&f(b)).unwrap_or(std::cmp::Ordering::Greater)
 }
 
-#[derive(Debug, Copy, Clone)]
-struct MinVelocity(Vec2);
-
 #[derive(Debug, Copy, Clone, Default)]
-struct Velocity(Vec2);
+struct Velocity {
+    v: Vec2,
+    min: Vec2,
+    disabled: bool,
+}
 impl Velocity {
+    fn new(v: Vec2) -> Self {
+        Self { v, ..Default::default() }
+    }
+
     fn knockback(&mut self, delta: Vec2, force: f32) {
         if delta.length_squared() > 0.0 {
-            self.0 += delta.normalize() * force;
+            self.v += delta.normalize() * force;
         }
     }
 }
@@ -146,6 +152,10 @@ impl Phys {
 
     fn pushbox(self, r: f32) -> Self {
         self.insert(Circle::push(r, vec2(0.0, r)))
+    }
+
+    fn pushbox_centered(self, r: f32) -> Self {
+        self.insert(Circle::push(r, vec2(0.0, 0.0)))
     }
 
     #[allow(dead_code)]
@@ -246,16 +256,17 @@ impl Physics {
         let Self { circles, collisions, hit_ents, stale_hit_ents } = self;
 
         system!(ecs, _,
-            pos           = &mut Vec2
-            Velocity(vel) = &mut _
-            min_vel       = Option<&MinVelocity>
+            pos = &mut Vec2
+            vel = &mut Velocity
         {
-            if let Some(&MinVelocity(mv)) = min_vel {
-                *pos += vel.signum() * vel.abs().max(mv.abs());
-            } else {
-                *pos += *vel;
+            if !vel.disabled {
+                if vel.min.length_squared() > 0.0 {
+                    *pos += vel.v.signum() * vel.v.abs().max(vel.min.abs());
+                } else {
+                    *pos += vel.v;
+                }
+                vel.v *= 0.93;
             }
-            *vel *= 0.93;
         });
 
         circles
@@ -301,9 +312,9 @@ impl Physics {
         }
 
         system!(ecs, _,
-            pos            = &mut Vec2
-            Velocity(vel)  = &mut _
-            Contacts(hits) = &_
+            pos                      = &mut Vec2
+            Velocity { v: vel, .. }  = &mut _
+            Contacts(hits)           = &_
         {
             for &Hit { depth, normal, circle_kinds, .. } in hits {
                 if circle_kinds == [CircleKind::Push, CircleKind::Push] {
@@ -827,8 +838,8 @@ impl WeaponKind {
                         tick,
                         alignment,
                     );
-                    sparkball.vel.0 *= 0.45;
-                    sparkball.min_vel.0 *= 0.6;
+                    sparkball.vel.v *= 0.45;
+                    sparkball.vel.min *= 0.6;
                     sparkball.shrink_out.end_tick += 30;
                     sparkball.bul.invincible_until_tick = tick;
                     sparkball
@@ -883,9 +894,12 @@ impl BulletKind {
                     .insert(Circle::hurt(0.13, dir * -0.4))
                     .insert(Circle::ghost_hit(0.13, dir * -0.2))
                     .insert(Circle::ghost_push(0.08, dir * -0.25)),
-                vel: Velocity(dir / 1.8),
-                min_vel: MinVelocity(dir / 2.8),
-                shrink_out: ShrinkOut { end_tick: tick + 800, shrink_at: tick + 775 },
+                vel: Velocity { v: dir / 1.8, min: dir / 2.8, ..Default::default() },
+                shrink_out: ShrinkOut {
+                    end_tick: tick + 800,
+                    shrink_at: tick + 775,
+                    ..Default::default()
+                },
                 scale: Scale::default(),
                 rot: Rot::from_vec2(dir),
                 contacts: Contacts::default(),
@@ -908,9 +922,12 @@ impl BulletKind {
                     .insert(Circle::hurt(0.4, Vec2::zero()))
                     .insert(Circle::ghost_hit(0.4, Vec2::zero()))
                     .insert(Circle::ghost_push(0.1, Vec2::zero())),
-                vel: Velocity(dir / 4.0),
-                min_vel: MinVelocity(dir / 12.0),
-                shrink_out: ShrinkOut { end_tick: tick + 150, shrink_at: tick + 125 },
+                vel: Velocity { v: dir / 4.0, min: dir / 12.0, ..Default::default() },
+                shrink_out: ShrinkOut {
+                    end_tick: tick + 150,
+                    shrink_at: tick + 125,
+                    ..Default::default()
+                },
                 scale: Scale::default(),
                 rot: Rot::from_vec2(dir),
                 contacts: Contacts::default(),
@@ -935,11 +952,11 @@ impl BulletKind {
                         .insert(Circle::hurt(0.04, Vec2::zero()))
                         .insert(Circle::ghost_push(0.04, Vec2::zero()))
                         .insert(Circle::ghost_hit(0.04, Vec2::zero())),
-                    vel: Velocity(dir / 5.0),
-                    min_vel: MinVelocity(dir / 16.0),
+                    vel: Velocity { v: dir / 5.0, min: dir / 16.0, ..Default::default() },
                     shrink_out: ShrinkOut {
                         end_tick: tick + rand::gen_range(20, 45),
                         shrink_at: tick,
+                        ..Default::default()
                     },
                     scale: Scale::default(),
                     rot: Rot::from_vec2(dir),
@@ -1311,7 +1328,7 @@ impl Hero<'_> {
 
         let moving = move_vec.length_squared() > 0.0;
         if moving {
-            self.vel.0 += move_vec
+            self.vel.v += move_vec
                 * if hero_swinging { mods.swinging_movement } else { 1.0 }
                 * if self.bag.weapon.is_none()
                     || move_vec.x() == 0.0
@@ -1346,6 +1363,9 @@ const GOLDEN_RATIO: f32 = 1.618034;
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum Art {
     Hero,
+    Rocky,
+    Elmer,
+    Bramble,
     Consumable(Consumable),
     Trinket(Trinket),
     Fireball,
@@ -1383,9 +1403,12 @@ impl Art {
     fn name(self) -> &'static str {
         match self {
             Art::Hero => "Hero",
+            Art::Rocky => "Rocky",
+            Art::Elmer => "Elmer",
             Art::Consumable(c) => c.name(),
             Art::Trinket(t) => t.name(),
             Art::Circle(_, _) => "Circle",
+            Art::Bramble => "Bramble",
             Art::Fireball => "Fireball",
             Art::Arrow => "Arrow",
             Art::Xp => "Xp",
@@ -1415,7 +1438,14 @@ impl Art {
             Art::Book | Art::RedArrow | Art::Chest | Art::Npc | Art::Sword | Art::FireWand => {
                 GOLDEN_RATIO / 2.0
             }
-            Art::Lockbox | Art::Compass | Art::Fireball | Art::Hero | Art::Arrow => 0.5,
+            Art::Elmer
+            | Art::Rocky
+            | Art::Lockbox
+            | Art::Compass
+            | Art::Fireball
+            | Art::Hero
+            | Art::Bramble
+            | Art::Arrow => 0.5,
             Art::Xp => 0.05,
             Art::TripletuftedTerrorworm
             | Art::VioletVagabond
@@ -1425,7 +1455,7 @@ impl Art {
             | Art::Bow(_) => 0.4,
             Art::Goblin => 0.3,
             Art::Circle(r, _) => r,
-            Art::Tree | Art::BigLog => 2.0,
+            Art::Tree | Art::BigLog => 3.0,
             Art::Post => 1.05,
             Art::Trinket(_) | Art::Consumable(_) => 0.0,
         }
@@ -1735,9 +1765,9 @@ impl Wander {
 
 fn wander(ecs: &mut hecs::World) {
     system!(ecs, _,
-        w           = &mut Wander
-        Velocity(v) = &mut _
-        &p          = &Vec2
+        w                  = &mut Wander
+        Velocity { v, .. } = &mut _
+        &p                 = &Vec2
     {
         let delta = w.goal - p;
         if delta.length() < 0.05 {
@@ -1757,7 +1787,6 @@ struct BulletBundle {
     bul: Bullet,
     phy: Phys,
     vel: Velocity,
-    min_vel: MinVelocity,
     alignment: Alignment,
     pos: Vec2,
     rot: Rot,
@@ -1770,6 +1799,12 @@ struct BulletBundle {
 struct ShrinkOut {
     end_tick: u32,
     shrink_at: u32,
+    from_scale: Scale,
+}
+impl Default for ShrinkOut {
+    fn default() -> Self {
+        Self { end_tick: u32::MAX, shrink_at: 0, from_scale: Scale::default() }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -1843,14 +1878,14 @@ impl Bullets {
         let Game { ecs, .. } = game;
 
         system!(ecs, bullet_ent,
-            &ShrinkOut { end_tick, shrink_at } = &_
+            &ShrinkOut { end_tick, shrink_at, from_scale } = &_
             Scale(scale)                       = &mut _
         {
             if tick > end_tick {
                 self.dead.push(BulletDeath::Fade { bullet_ent });
             }
             if tick > shrink_at {
-                *scale = Vec2::one() * (1.0 - (tick - shrink_at) as f32 / (end_tick - shrink_at) as f32);
+                *scale = from_scale.0 * (1.0 - (tick - shrink_at) as f32 / (end_tick - shrink_at) as f32);
             }
         });
 
@@ -1870,7 +1905,7 @@ impl Bullets {
             &pos              = &Vec2
             &bullet           = &Bullet
             &alignment        = &Alignment
-            &MinVelocity(vel) = &_
+            &vel              = &Velocity
         {
             if tick < bullet.invincible_until_tick {
                 continue
@@ -1881,7 +1916,7 @@ impl Bullets {
                     bullet,
                     alignment,
                     circle_kinds,
-                    hit, pos, vel,
+                    hit, pos, vel: vel.min,
                 });
             }
         });
@@ -2285,7 +2320,7 @@ fn update_hero(
     bag_ui: &mut BagUi,
     levels: &mut Levels,
 ) {
-    let &Game { tick, mouse_pos, .. } = &*game;
+    let &Game { tick, mouse_pos, hero_movement_locked, .. } = &*game;
     let Game { ecs, hero_swinging, .. } = game;
 
     let (hero_pos, hero_vel, hero_dir, hero_wep, hero_mod, hero_moving) =
@@ -2294,7 +2329,8 @@ fn update_hero(
                 let mods = HeroMod::default() + hero.bag.mods() + levels.mods();
                 hero.hp.1 = mods.max_hp;
 
-                let hero_moving = hero.movement(mods, *hero_swinging);
+                let hero_moving =
+                    if hero_movement_locked { false } else { hero.movement(mods, *hero_swinging) };
 
                 for consumable in bag_ui.stomach.drain(..) {
                     hero.consume(consumable);
@@ -2302,7 +2338,7 @@ fn update_hero(
 
                 (
                     *hero.pos,
-                    hero.vel.0,
+                    hero.vel.v,
                     *hero.dir,
                     hero.bag.weapon.as_mut().and_then(|w| w.out()),
                     mods,
@@ -2436,7 +2472,7 @@ fn update_hero(
         game.ecs.spawn(bullet);
     }
 
-    if let Ok(Velocity(v)) = game.ecs.get_mut::<Velocity>(hero).as_deref_mut() {
+    if let Ok(Velocity { v, .. }) = game.ecs.get_mut::<Velocity>(hero).as_deref_mut() {
         *v += knockback;
     }
 }
@@ -2570,7 +2606,7 @@ impl Waffle {
                     *attack_kind = Some(f.behavior.attack_kind(hp));
                 }
 
-                if let Ok(Velocity(vel)) = game.ecs.get_mut(e).as_deref_mut() {
+                if let Ok(Velocity { v: vel, .. }) = game.ecs.get_mut(e).as_deref_mut() {
                     let (d, speed) = if Some(e) == *attacker && *last_attack + 40 > tick {
                         let goal = hero_pos + (pos - hero_pos).normalize() * 2.0;
                         ((goal - pos), f.charge_speed)
@@ -2582,9 +2618,7 @@ impl Waffle {
                 }
             }
 
-            if let Ok(Some(wep_ent)) =
-                game.ecs.get_mut::<Bag>(e).map(|mut b| b.weapon.as_mut().and_then(|w| w.out()))
-            {
+            if let Some(wep_ent) = game.weapon_ent(e) {
                 let (attacks, bullets) = game
                     .ecs
                     .query_one_mut::<Weapon>(wep_ent)
@@ -2598,7 +2632,7 @@ impl Waffle {
                             },
                             target: hero_pos,
                             wielder_pos: pos,
-                            wielder_vel: vel.0,
+                            wielder_vel: vel.v,
                             wielder_dir: (hero_pos - pos).x().into(),
                             speed_multiplier: 1.0,
                             tick,
@@ -2636,6 +2670,30 @@ impl Waffle {
                 }
             }
         }
+
+        enemies.extend(
+            game.ecs
+                .query::<(&_, &_, &Fighter, &_)>()
+                .iter()
+                .filter(|(_, (_, _, f, ..))| !f.aggroed)
+                .map(|(e, (p, v, f, h))| (e, *p, *v, *f, *h)),
+        );
+        for (e, pos, vel, f, hp) in enemies.drain(..) {
+            if let Some(wep_ent) = game.weapon_ent(e) {
+                if let Some(mut wep) = game.ecs.query_one_mut::<Weapon>(wep_ent).ok() {
+                    wep.tick(WeaponInput {
+                        start_attacking: None,
+                        target: hero_pos,
+                        wielder_pos: pos,
+                        wielder_vel: vel.v,
+                        wielder_dir: vel.v.x().into(),
+                        speed_multiplier: 1.0,
+                        tick,
+                    });
+                }
+            }
+        }
+
         *occupied_slots_last_frame = slots.iter().filter(|&&s| s).count();
     }
 }
@@ -2863,6 +2921,82 @@ struct SpillXp(usize);
 #[derive(Clone, Debug, Default)]
 struct SpillItems(SmallVec<[Item; 5]>);
 
+struct RunPath {
+    path: Vec<Vec2>,
+    start_tick: u32,
+    follow_through: f32,
+    duration: u32,
+}
+impl RunPath {
+    fn done(&self, tick: u32) -> bool {
+        (self.start_tick + self.duration) < tick
+    }
+
+    fn progress(&self, tick: u32) -> f32 {
+        ((tick - self.start_tick) as f32) / self.duration as f32
+    }
+
+    fn point(&self, t: f32) -> Vec2 {
+        let &RunPath { ref path, .. } = self;
+
+        std::iter::successors(Some(SmallVec::from_slice(path)), |path: &SmallVec<[Vec2; 10]>| {
+            if path.len() > 1 {
+                Some(
+                    path.windows(2)
+                        .filter_map(|p: &[Vec2]| {
+                            let mut points = p.iter().copied();
+                            let p0 = points.next()?;
+                            let p1 = points.next().unwrap_or(p0);
+                            Some(p0.lerp(p1, t))
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            }
+        })
+        .last()
+        .and_then(|l| l.last().copied())
+        .unwrap_or_default()
+    }
+
+    fn vel(&self, tick: u32) -> Vec2 {
+        self.point(self.progress(tick)) - self.point(self.progress(tick - 1))
+    }
+}
+
+fn run_paths(&mut Game { ref mut ecs, tick, .. }: &mut Game) {
+    system!(ecs, _,
+        pos = &mut Vec2
+        vel = &mut Velocity
+        run = &RunPath
+    {
+        if tick < run.start_tick || tick > run.start_tick + run.duration {
+            continue
+        }
+
+        let t = run.progress(tick);
+
+        vel.disabled = true;
+        vel.v = run.vel(tick);
+
+        if t == 1.0 {
+            vel.v = run.vel(tick).normalize() * run.follow_through;
+            vel.disabled = false;
+        }
+        *pos = run.point(t);
+    });
+}
+
+struct Starstruck {
+    start_tick: u32,
+    duration: u32,
+}
+struct Surprised {
+    start_tick: u32,
+    duration: u32,
+}
+
 #[macroquad::main("rpg")]
 async fn main() {
     let mut ecs = hecs::World::new();
@@ -2896,42 +3030,520 @@ async fn main() {
     #[derive(miniserde::Serialize, miniserde::Deserialize, Debug)]
     struct Map {
         trees: Vec<(f32, f32)>,
+        brambles: Vec<(f32, f32)>,
+        rocky_enter: Vec<(f32, f32)>,
+        rocky_hide: Vec<(f32, f32)>,
+        rocky_bounce1: Vec<(f32, f32)>,
+        rocky_bounce2: Vec<(f32, f32)>,
+        melee_enter: Vec<(f32, f32)>,
+        ranged_enter: Vec<(f32, f32)>,
         circles: Vec<MapCircleCollider>,
     }
-    let Map { trees, circles } = miniserde::json::from_str(
+    let Map {
+        trees,
+        brambles,
+        circles,
+        rocky_enter,
+        rocky_hide,
+        rocky_bounce1,
+        rocky_bounce2,
+        melee_enter,
+        ranged_enter,
+        ..
+    } = miniserde::json::from_str(
         &String::from_utf8(load_file("./map.json").await.unwrap()).unwrap(),
     )
     .unwrap();
 
+    ecs.spawn((
+        rocky_enter.last().map(|&xy| Vec2::from(xy)).unwrap_or_default(),
+        Art::Circle(0.2, GRAY),
+    ));
+
     for (x, y) in trees.into_iter() {
-        ecs.spawn((vec2(y, -x - 0.4), Art::Tree));
+        ecs.spawn((vec2(x, y - 0.4), Art::Tree));
 
         let shadow_r = 0.82;
         ecs.spawn((
-            vec2(y - 0.1, -x - shadow_r + 0.1),
+            vec2(x, y - shadow_r),
             Art::Circle(shadow_r, Color([45, 110, 92, 255])),
             ZOffset(1000.0),
         ));
     }
 
     for MapCircleCollider { pos: (x, y), radius } in circles.into_iter() {
-        ecs.spawn((vec2(y, -x - radius), Phys::new().pushbox(radius)));
+        ecs.spawn((vec2(x, y - radius), Phys::new().pushbox(radius)));
     }
 
-    let big_log_pos = vec2(2.5, 4.0);
+    let big_log_pos = vec2(2.0, 5.0);
     ecs.spawn((big_log_pos, Art::BigLog, Phys::new().wings(0.8, 0.8, CircleKind::Push)));
 
+    let rocky = ecs.reserve_entity();
+    let elmer = ecs.reserve_entity();
+    let elmer_enter = {
+        let mut path = rocky_enter.clone();
+        if let Some(p) = path.last_mut() {
+            p.0 += 1.0;
+            p.1 -= 1.0;
+        }
+        path
+    };
+    let mut elmer_leave = elmer_enter.clone();
+
     let mut tasks = vec![];
+
     tasks.push(Task {
-        label: "Navigate to the Sword",
-        req: Box::new(move |g| g.hero_dist(big_log_pos + vec2(0.0, 1.8)) < 0.8),
-        guide: Box::new(move |g, gi| {
-            if g.tick > 300 {
-                gi.push((Art::RedArrow, big_log_pos + vec2(0.0, 1.8)))
+        label: "Quick, hide!",
+        req: Box::new(move |g, _| g.hero_dist(big_log_pos + vec2(0.0, 1.6)) < 0.8),
+        guide: Box::new(move |g, _, gi| {
+            if g.tick > 100 {
+                gi.push((Art::RedArrow, big_log_pos + vec2(0.0, 1.6)))
+            }
+        }),
+        on_finish: Box::new(move |g, _| {
+            or_err!(g.ecs.insert(
+                rocky,
+                (
+                    Art::Rocky,
+                    Vec2::from(rocky_enter[0]),
+                    Velocity::default(),
+                    RunPath {
+                        follow_through: 0.0,
+                        path: rocky_enter.iter().map(|&xy| Vec2::from(xy)).collect(),
+                        start_tick: g.tick,
+                        duration: 160,
+                    },
+                    Bag::holding(Item::sword(rocky)),
+                )
+            ));
+            g.camera_focus_ent = rocky;
+            g.hero_movement_locked = true;
+        }),
+        ..Default::default()
+    });
+
+    tasks.push(Task {
+        label: "Watch out for that rock, Rocky",
+        req: Box::new(move |g, _| {
+            let (rocky_run_done, rocky_vel) = {
+                let run = match g.ecs.get::<RunPath>(rocky) {
+                    Ok(r) => r,
+                    _ => return false,
+                };
+
+                (run.done(g.tick), run.vel(g.tick))
+            };
+            let rocky_pos = g.pos(rocky);
+            let wep_ent = g.weapon_ent(rocky);
+
+            let tick = g.tick;
+            if let Some(mut wep) = wep_ent.and_then(|e| g.ecs.query_one_mut::<Weapon>(e).ok()) {
+                wep.tick(WeaponInput {
+                    start_attacking: None,
+                    target: Vec2::zero(),
+                    wielder_pos: rocky_pos,
+                    wielder_vel: rocky_vel,
+                    wielder_dir: Direction::Left,
+                    speed_multiplier: 1.0,
+                    tick,
+                });
+            }
+            if let Some(e) = wep_ent.filter(|_| rocky_run_done) {
+                or_err!(g.ecs.insert_one(e, Velocity::new(Vec2::one() * -0.1)));
+            }
+            rocky_run_done
+        }),
+        on_finish: Box::new(move |g, _| {
+            or_err!(g.ecs.insert_one(
+                rocky,
+                RunPath {
+                    path: rocky_bounce1.iter().map(|&xy| Vec2::from(xy)).collect(),
+                    follow_through: 0.0,
+                    start_tick: g.tick,
+                    duration: 65,
+                }
+            ));
+        }),
+        ..Default::default()
+    });
+
+    tasks.push(Task {
+        label: "Ouch, Rocky!",
+        req: Box::new(move |g, _| g.path_finished(rocky)),
+        on_finish: Box::new(move |g, _| {
+            or_err!(g.ecs.insert_one(
+                rocky,
+                RunPath {
+                    path: rocky_bounce2.iter().map(|&xy| Vec2::from(xy)).collect(),
+                    follow_through: 0.0,
+                    start_tick: g.tick,
+                    duration: 55,
+                }
+            ));
+        }),
+        ..Default::default()
+    });
+
+    tasks.push(Task {
+        label: "Ouch again, Rocky!",
+        req: Box::new(move |g, _| g.path_finished(rocky)),
+        on_finish: Box::new({
+            let rocky_hide = rocky_hide.clone();
+            move |g, _| {
+                const HIDE_TIME: u32 = 100;
+                or_err!(g.ecs.insert(
+                    rocky,
+                    (
+                        RunPath {
+                            path: rocky_hide.iter().map(|&xy| Vec2::from(xy)).collect(),
+                            start_tick: g.tick + 160,
+                            follow_through: 0.05,
+                            duration: HIDE_TIME,
+                        },
+                        Starstruck { start_tick: g.tick, duration: 140 },
+                        Surprised { start_tick: g.tick + 160 + HIDE_TIME, duration: 50 },
+                    )
+                ));
+                g.speech.push((
+                    Speaker::Rocky,
+                    "Who the hell are you?      \nNevermind, he's almost here!".to_string(),
+                    g.tick + 160 + HIDE_TIME,
+                ));
             }
         }),
         ..Default::default()
     });
+
+    tasks.push(Task {
+        label: "Rocky, hide!",
+        req: Box::new(move |g, _| {
+            g.ecs.get::<RunPath>(rocky).map(|rp| rp.done(g.tick - 200)).unwrap_or(false)
+        }),
+        on_finish: Box::new(move |g, _| {
+            or_err!(g.ecs.insert(
+                elmer,
+                (
+                    Art::Elmer,
+                    Health::full(10),
+                    Bag::holding(Item::sword(elmer)),
+                    Fighter::default(),
+                    Vec2::from(elmer_enter[0]),
+                    Velocity::default(),
+                    RunPath {
+                        follow_through: 0.1,
+                        path: elmer_enter.iter().map(|&xy| Vec2::from(xy)).collect(),
+                        start_tick: g.tick,
+                        duration: 175,
+                    },
+                )
+            ));
+            g.camera_focus_ent = elmer;
+        }),
+        ..Default::default()
+    });
+
+    tasks.push(Task {
+        label: "Let Elmer charge in",
+        req: Box::new(move |g, _| g.path_finished(elmer)),
+        on_finish: Box::new(move |g, _| {
+            g.speech.push((
+                Speaker::Elmer,
+                "Rocky's sword is here...      \nBut Rocky ain't!".to_string(),
+                g.tick + 50,
+            ));
+            g.speech.push((
+                Speaker::Elmer,
+                concat!(
+                    "The forest creatures must've gotten him!      \n",
+                    "Serves him right, he should've kept\n",
+                    "his hands off my sister!",
+                ).to_string(),
+                g.tick + 290,
+            ));
+            g.speech.push((
+                Speaker::Elmer,
+                concat!(
+                    "What was that noise?                      \n",
+                    "Couldn't have been ...        \n",
+                    "forest creatures?"
+                ).to_string(),
+                g.tick + 710,
+            ));
+            or_err!(g.ecs.insert_one(elmer, Surprised { start_tick: g.tick + 950, duration: 100 }));
+        }),
+        ..Default::default()
+    });
+
+    tasks.push(Task {
+        label: "Wait for Elmer to get scared ...",
+        req: Box::new(move |g, _| {
+            g.ecs.get::<Surprised>(elmer).map(|rp| rp.start_tick + 50 < g.tick).unwrap_or(false)
+        }),
+        on_finish: Box::new(move |g, _| {
+            *elmer_leave.last_mut().unwrap() = g.pos(elmer).into();
+            or_err!(g.ecs.insert_one(elmer, RunPath {
+                follow_through: 0.1,
+                path: elmer_leave.iter().rev().map(|&xy| Vec2::from(xy)).collect(),
+                start_tick: g.tick,
+                duration: 105,
+            }));
+            g.camera_focus_ent = hero;
+            g.speech.push((
+                Speaker::Rocky,
+                concat!(
+                    "That liar!      \n",
+                    "I never touched his sister!\n",
+                    "Besides, she wanted to talk to me!"
+                ).to_string(),
+                g.tick + 50,
+            ));
+            g.speech.push((
+                Speaker::Rocky,
+                concat!(
+                    "Whatever. We need to get out of here!       \n",
+                    "The forest creatures are no joke.",
+                ).to_string(),
+                g.tick + 300,
+            ));
+            g.speech.push((
+                Speaker::Rocky,
+                concat!(
+                    "You take my sword, I'm more of a lover\n",
+                    "than a fighter anyway.",
+                ).to_string(),
+                g.tick + 600,
+            ));
+        }),
+        ..Default::default()
+    });
+
+    tasks.push(Task {
+        label: "Let Rocky finish talking",
+        req: Box::new(move |g, _| g.speech.last().map(|(_, _, t)| t + 20 < g.tick).unwrap_or(true)),
+        on_finish: Box::new({
+            let rocky_hide = rocky_hide.clone();
+            move |g, _| {
+                g.hero_movement_locked = false;
+                or_err!(g.ecs.despawn(elmer));
+                let rocky_pos = g.pos(rocky);
+                or_err!(g.ecs.insert_one(
+                    rocky,
+                    RunPath {
+                        follow_through: 0.1,
+                        path: Some(rocky_pos)
+                            .into_iter()
+                            .chain(rocky_hide.iter().rev().skip(1).map(|&xy| Vec2::from(xy)))
+                            .collect(),
+                        start_tick: g.tick,
+                        duration: 165,
+                    }
+                ));
+            }
+        }),
+        ..Default::default()
+    });
+
+    struct Brambles {
+        plants: [hecs::Entity; 8],
+        pads: [hecs::Entity; 8],
+        start_tick: u32,
+    };
+    impl Brambles {
+        fn new(coords: &Vec<(f32, f32)>, Game { ecs, tick, .. }: &mut Game) -> Self {
+            let mut c = coords.into_iter().copied().cycle();
+            Self {
+                start_tick: *tick,
+                plants: [(); 8].map(|_| {
+                    ecs.spawn((
+                        Vec2::from(c.next().unwrap()),
+                        Art::Bramble,
+                        Phys::new().hitbox(0.3).pushbox_centered(0.6),
+                        Health::full(1),
+                    ))
+                }),
+                pads: [(); 8].map(|_| {
+                    ecs.spawn((Vec2::from(c.next().unwrap()) - vec2(0.0, 0.4), ZOffset(999.0)))
+                }),
+            }
+        }
+
+        fn update(&self, g: &mut Game) {
+            let tick = g.tick;
+
+            for (&plant, &pad) in self.plants.iter().zip(&self.pads) {
+                let scale = ((tick - self.start_tick) as f32 / 300.0).min(1.0);
+                let mut pad_color = DARKGREEN;
+                pad_color.0[1] -= 30;
+                pad_color.0[2] -= 30;
+                pad_color.0[3] = 100;
+                if !g.dead(plant) {
+                    or_err!(g.ecs.insert_one(pad, Art::Circle(0.2 + 0.3 * scale, pad_color)));
+                    or_err!(g.ecs.insert_one(plant, Scale(vec2(1.0, scale))));
+                }
+            }
+        }
+
+        fn living<'a>(&'a self, ecs: &'a hecs::World) -> impl Iterator<Item = hecs::Entity> + 'a {
+            self.plants.iter().copied().filter(move |&e| ecs.contains(e))
+        }
+
+        fn dead<'a>(&'a self, ecs: &'a hecs::World) -> impl Iterator<Item = hecs::Entity> + 'a {
+            self.plants.iter().copied().filter(move |&e| !ecs.contains(e))
+        }
+    }
+
+    let melee = ecs.reserve_entity();
+    let ranged = ecs.reserve_entity();
+
+    tasks.push(Task {
+        label: "Take Rocky's Sword",
+        req: Box::new(move |g, _| {
+            g.weapon_ent(rocky).map(|e| g.hero_dist_ent(e) < 1.3).unwrap_or(false)
+        }),
+        guide: Box::new(move |g, _, gi| {
+            if let Some(e) = g.weapon_ent(rocky) {
+                gi.push((Art::RedArrow, g.pos(e) + vec2(-0.75, -0.5)))
+            }
+        }),
+        on_finish: Box::new(move |g, _| {
+            if let Some(ent) = g.weapon_ent(rocky) {
+                or_err!(g.ecs.despawn(ent));
+            }
+            or_err!(g.give_item(hero, Item::sword(hero)));
+        }),
+        ..Default::default()
+    });
+
+    tasks.push(Task {
+        req: Box::new(move |g, _| g.path_finished(rocky)),
+        on_finish: Box::new(move |g, map| {
+            let b = Brambles::new(&brambles, g);
+            map.insert(b);
+
+            or_err!(g.ecs.insert(
+                melee,
+                (
+                    Art::Goblin,
+                    Health::full(2),
+                    HealthBar,
+                    Vec2::from(melee_enter[0]),
+                    RunPath {
+                        follow_through: 0.1,
+                        path: melee_enter.iter().map(|&xy| Vec2::from(xy)).collect(),
+                        start_tick: g.tick,
+                        duration: 175,
+                    },
+                    SpillXp(10),
+                    Fighter {
+                        chase_speed: 0.0045,
+                        charge_speed: 0.0065,
+                        chase_distance: 50.0,
+                        attack_interval: 60,
+                        ..Default::default()
+                    },
+                    Phys::new().insert(Circle::push(0.2, vec2(0.0, 0.1))).hitbox(0.3),
+                    Velocity::default(),
+                    Bag::holding(Item::sword(melee)),
+                )
+            ));
+
+            or_err!(g.ecs.insert(
+                ranged,
+                (
+                    Art::Goblin,
+                    Health::full(2),
+                    HealthBar,
+                    Vec2::from(ranged_enter[0]),
+                    SpillXp(10),
+                    Fighter { behavior: FighterBehavior::Ranged, ..Default::default() },
+                    Phys::new().insert(Circle::push(0.2, vec2(0.0, 0.1))).hitbox(0.3),
+                    Velocity::default(),
+                    RunPath {
+                        follow_through: 0.1,
+                        path: ranged_enter.iter().map(|&xy| Vec2::from(xy)).collect(),
+                        start_tick: g.tick,
+                        duration: 175,
+                    },
+                    Bag::holding(Item::bow(ranged)),
+                )
+            ));
+
+            g.speech.push((Speaker::Rocky, "Wh... what the hell!?!".to_string(), g.tick + 75));
+        }),
+        ..Default::default()
+    });
+
+    tasks.push(Task {
+        label: "Let the Brambles Grow",
+        req: Box::new(move |g, map| {
+            if let Some(brambles) = map.get::<Brambles>() {
+                brambles.update(g);
+                brambles.start_tick + 300 < g.tick
+            } else {
+                false
+            }
+        }),
+        on_finish: Box::new(move |g, _| {
+            g.camera_focus_ent = melee;
+            g.speech.push((
+                Speaker::Rocky,
+                "FOREST CREATURES!!!!".to_string(),
+                g.tick + 30,
+            ));
+        }),
+        ..Default::default()
+    });
+
+    tasks.push(Task {
+        label: "Watch Rocky Hide, Again",
+        req: Box::new(move |g, map| g.speech.last().map(|(_, _, t)| t + 200 < g.tick).unwrap_or(true)),
+        on_finish: Box::new(move |g, _| {
+            let rocky_pos = g.pos(rocky);
+            g.camera_focus_ent = rocky;
+            or_err!(g.ecs.insert(rocky, (
+                RunPath {
+                    path: Some(rocky_pos)
+                        .into_iter()
+                        .chain(rocky_hide.iter().skip(1).map(|&xy| Vec2::from(xy)))
+                        .collect(),
+                    start_tick: g.tick + 30,
+                    follow_through: 0.05,
+                    duration: 70,
+                },
+                Surprised {
+                    start_tick: g.tick,
+                    duration: 120,
+                }
+            )));
+        }),
+        ..Default::default()
+    });
+
+    tasks.push(Task {
+        label: "Break past the Brambles!",
+        req: Box::new(move |g, map| {
+            if g.path_finished(rocky) {
+                g.camera_focus_ent = hero;
+            }
+            if let Some(brambles) = map.get::<Brambles>() {
+                brambles.update(g);
+                brambles.dead(&g.ecs).count() > 0
+            } else {
+                false
+            }
+        }),
+        guide: Box::new(move |g, map, gi| {
+            if let Some(brambles) = map.get::<Brambles>() {
+                let f = brambles.plants[2];
+                if g.ecs.contains(f) {
+                    gi.push((Art::Sword, g.pos(f) + vec2(0.0, 2.0)));
+                }
+            }
+        }),
+        on_finish: Box::new(move |g, _| {}),
+        ..Default::default()
+    });
+
     quests.add(Quest {
         title: "Rocky & The Forest Creatures",
         completion_quip: "Yes, all quest names should sound like band names.",
@@ -2943,7 +3555,8 @@ async fn main() {
     const STEP_EVERY: f64 = 1.0 / 60.0;
     let mut time = STEP_EVERY;
     let mut step = get_time();
-    let mut game = Game::new(ecs);
+    let mut game = Game::new(ecs, hero);
+    game.speech.push((Speaker::Player, "Someone's coming.\nMaybe I should hide!".to_string(), 0));
     loop {
         time += get_time() - step;
         step = get_time();
@@ -2968,6 +3581,7 @@ async fn main() {
             levels.update(&mut game);
             levels.update_icon(&mut game, &drawer);
             wander(&mut game.ecs);
+            run_paths(&mut game);
 
             update_hero(hero, &mut game, &mut quests, &mut bag_ui, &mut levels);
 
@@ -3013,24 +3627,74 @@ struct Combo {
     hp_awarded: bool,
 }
 
+#[derive(Copy, Clone, Debug)]
+enum Speaker {
+    Player,
+    Rocky,
+    Elmer,
+}
+impl Speaker {
+    fn name(self) -> &'static str {
+        match self {
+            Speaker::Player => "PLAYER",
+            Speaker::Rocky => "ROCKY",
+            Speaker::Elmer => "ELMER",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Speaker::Player => {
+                let mut b = BLUE;
+                b.0[1] -= 85;
+                b.0[2] -= 55;
+                b
+            }
+            Speaker::Rocky => {
+                let mut r = RED;
+                r.0[0] -= 85;
+                r.0[1] -= 25;
+                r
+            }
+            Speaker::Elmer => {
+                let mut g = GOLD;
+                g.0[0] -= 55;
+                g.0[1] -= 85;
+                g
+            }
+        }
+    }
+}
+
 struct Game {
+    speech: Vec<(Speaker, String, u32)>,
+
     ecs: hecs::World,
+
+    hero_movement_locked: bool,
     hero_pos: Vec2,
     hero_mod: HeroMod,
     combo: Option<Combo>,
     /// Any stage of swinging
     hero_swinging: bool,
+
+    camera_focus_ent: hecs::Entity,
+
     /// In game coordinates
     mouse_pos: Vec2,
     mouse_down_tick: Option<u32>,
+
     tick: u32,
 }
 impl Game {
-    fn new(ecs: hecs::World) -> Self {
+    fn new(ecs: hecs::World, camera_focus_ent: hecs::Entity) -> Self {
         Self {
             ecs,
+            speech: Vec::with_capacity(10),
+            hero_movement_locked: false,
             hero_pos: Vec2::zero(),
             hero_mod: HeroMod::empty(),
+            camera_focus_ent,
             combo: None,
             hero_swinging: false,
             tick: 0,
@@ -3043,7 +3707,7 @@ impl Game {
         for _ in 0..amount {
             self.ecs.spawn((
                 pos,
-                Velocity(rand_vec2() * rand::gen_range(0.05, 0.1)),
+                Velocity::new(rand_vec2() * rand::gen_range(0.05, 0.1)),
                 Art::Xp,
                 Contacts::default(),
                 Xp(self.tick + 10),
@@ -3076,8 +3740,20 @@ impl Game {
         Ok(())
     }
 
+    fn path_finished(&self, e: hecs::Entity) -> bool {
+        self.ecs.get::<RunPath>(e).map(|rp| rp.done(self.tick)).unwrap_or(false)
+    }
+
     fn pos(&self, e: hecs::Entity) -> Vec2 {
         self.ecs.get::<Vec2>(e).as_deref().copied().unwrap_or_default()
+    }
+
+    fn hp(&self, e: hecs::Entity) -> u32 {
+        self.ecs.get::<Health>(e).map(|hp| hp.0).unwrap_or_default()
+    }
+
+    fn weapon_ent(&mut self, e: hecs::Entity) -> Option<hecs::Entity> {
+        self.ecs.get_mut::<Bag>(e).ok().and_then(|mut b| b.weapon.as_mut().and_then(|w| w.out()))
     }
 
     /// The tuple's first field is true if they died,
@@ -3092,15 +3768,20 @@ impl Game {
             damage *= 3;
         }
 
-        if let Ok((Health(hp, _), vel, &pos, ino, fighter, spill_xp)) = self.ecs.query_one_mut::<(
-            &mut _,
-            Option<&mut Velocity>,
-            &Vec2,
-            Option<&Innocence>,
-            Option<&mut Fighter>,
-            Option<&SpillXp>,
-        )>(hit)
+        if let Ok((Health(hp, _), vel, &pos, ino, fighter, spill_xp, scale, art)) =
+            self.ecs.query_one_mut::<(
+                &mut _,
+                Option<&mut Velocity>,
+                &Vec2,
+                Option<&Innocence>,
+                Option<&mut Fighter>,
+                Option<&SpillXp>,
+                Option<&Scale>,
+                Option<&Art>,
+            )>(hit)
         {
+            let (art, scale) = (art.copied(), scale.copied());
+
             if let Some(true) = ino.map(|i| i.active(tick)) {
                 return (false, Vec2::zero());
             }
@@ -3131,6 +3812,15 @@ impl Game {
                     }
                 }
 
+                if let (Some(art), Some(scale)) = (art, scale) {
+                    self.ecs.spawn((
+                        ShrinkOut { end_tick: tick + 125, shrink_at: tick, from_scale: scale },
+                        scale,
+                        art,
+                        pos,
+                    ));
+                }
+
                 or_err!(self.ecs.despawn(hit));
             }
             self.ecs.spawn((DamageLabel { tick, hp: -(damage as i32), pos, for_ent: hit },));
@@ -3151,29 +3841,29 @@ struct HitInput {
 
 struct Task {
     label: &'static str,
-    req: Box<dyn FnMut(&Game) -> bool>,
-    guide: Box<dyn FnMut(&Game, &mut Vec<(Art, Vec2)>)>,
-    on_finish: Box<dyn FnMut(&mut Game)>,
+    req: Box<dyn FnMut(&mut Game, &mut StaticTypeMap) -> bool>,
+    guide: Box<dyn FnMut(&mut Game, &mut StaticTypeMap, &mut Vec<(Art, Vec2)>)>,
+    on_finish: Box<dyn FnMut(&mut Game, &mut StaticTypeMap)>,
     finished: bool,
 }
 impl Default for Task {
     fn default() -> Self {
         Self {
             label: "",
-            req: Box::new(|_| true),
-            on_finish: Box::new(|_| {}),
-            guide: Box::new(|_, _| {}),
+            req: Box::new(|_, _| true),
+            on_finish: Box::new(|_, _| {}),
+            guide: Box::new(|_, _, _| {}),
             finished: false,
         }
     }
 }
 impl Task {
-    fn done(&mut self, g: &mut Game) -> bool {
+    fn done(&mut self, g: &mut Game, map: &mut StaticTypeMap) -> bool {
         let Self { finished, req, .. } = self;
         if !*finished {
-            *finished = (*req)(&*g);
+            *finished = (*req)(g, map);
             if *finished {
-                (self.on_finish)(g);
+                (self.on_finish)(g, map);
             }
         }
         *finished
@@ -3284,6 +3974,7 @@ pub fn open_tree<F: FnOnce(&mut megaui::Ui)>(
 
 struct Quests {
     quests: QuestVec,
+    map: StaticTypeMap,
     temp: Vec<usize>,
     tab_titles: [String; 3],
     new_tabs: [bool; 3],
@@ -3297,6 +3988,7 @@ impl Quests {
     fn new(ecs: &mut hecs::World) -> Self {
         Self {
             quests: QuestVec(Vec::with_capacity(100)),
+            map: StaticTypeMap::with_capacity(100),
             temp: Vec::with_capacity(100),
             tab_titles: [(); 3].map(|_| String::with_capacity(25)),
             new_tabs: [false; 3],
@@ -3315,14 +4007,14 @@ impl Quests {
     }
 
     fn update(&mut self, g: &mut Game) {
-        let Self { quests, guides, jump_to_tab, temp, new_tabs, .. } = self;
+        let Self { quests, guides, map, jump_to_tab, temp, new_tabs, .. } = self;
 
         guides.drain(..);
         for (_, _, quest) in quests.accepted_mut() {
             if let Some(task) =
-                quest.tasks.iter_mut().find_map(|t| if !t.done(g) { Some(t) } else { None })
+                quest.tasks.iter_mut().find_map(|t| if !t.done(g, map) { Some(t) } else { None })
             {
-                (task.guide)(g, guides);
+                (task.guide)(g, map, guides);
             } else {
                 quest.completion.finish(g.tick);
                 *jump_to_tab = Some(2);
@@ -3648,13 +4340,52 @@ impl Drawer {
     fn update(&mut self, game: &mut Game) {
         let Self { damage_labels, cam, .. } = self;
         damage_labels.update(game);
-        cam.target = cam.target.lerp(game.hero_pos + vec2(0.0, 0.5), 0.05);
+
+        let &mut Game { ref ecs, camera_focus_ent, hero_pos, .. } = game;
+        let p = ecs.get::<Vec2>(camera_focus_ent).as_deref().copied().unwrap_or(hero_pos);
+        cam.target = cam.target.lerp(p + vec2(0.0, 0.5), 0.05);
     }
 
     fn draw(&mut self, game: &Game) {
         self.sprites(game);
 
         self.damage_labels.draw(game, &self.cam);
+        if let Some((speaker, msg, start_tick)) =
+            game.speech.iter().filter(|(_, _, t)| *t < game.tick).last()
+        {
+            let w = screen_width() * 0.8;
+            let x = screen_width() * 0.1;
+            let y = self
+                .cam
+                .world_to_screen(vec2(1.0, 1.2) + self.cam.target - self.screen * vec2(1.0, -1.0))
+                .y();
+
+            let font_size = (w / 25.0).round();
+            let h = font_size * 5.0;
+            draw_rectangle(x, y, w, -h, Color([225, 245, 245, 175]));
+            draw_rectangle(x - 4.0, y + 4.0, w + 8.0, -h - 8.0, Color([225, 245, 245, 30]));
+            let up_to_byte = msg
+                .char_indices()
+                .nth((game.tick - start_tick) as usize / 3)
+                .map(|(index, _)| index)
+                .unwrap_or(msg.len());
+            for (i, line) in msg[0..up_to_byte].lines().enumerate() {
+                draw_text(
+                    line,
+                    (x + font_size).round(),
+                    (y - h + font_size / 2.0 + i as f32 * 1.2 * font_size).round(),
+                    font_size,
+                    speaker.color(),
+                );
+            }
+            draw_text(
+                speaker.name(),
+                (x + w - font_size * 0.5 * speaker.name().chars().count() as f32).round(),
+                y - h,
+                font_size,
+                speaker.color(),
+            );
+        }
     }
 
     fn sprites(&mut self, Game { ecs, tick, .. }: &Game) {
@@ -3752,6 +4483,8 @@ impl Drawer {
 
             match art {
                 Art::Hero => rect(BLUE, 1.0, 1.0),
+                Art::Rocky => rect(RED, 1.0, 1.0),
+                Art::Elmer => rect(GOLD, 1.0, 1.0),
                 Art::Scarecrow => rect(GOLD, 0.8, 0.8),
                 Art::TripletuftedTerrorworm => rect(WHITE, 0.8, 0.8),
                 Art::VioletVagabond => rect(VIOLET, 0.8, 0.8),
@@ -3759,6 +4492,28 @@ impl Drawer {
                 Art::Npc => rect(GREEN, 1.0, GOLDEN_RATIO),
                 Art::Circle(r, color) => {
                     draw_circle(x, y + r, r, color);
+                }
+                Art::Bramble => {
+                    for q in 0..3 {
+                        let mut color = DARKGREEN;
+                        color.0[1] -= 20;
+                        color.0[2] -= 20;
+
+                        let p = |i| {
+                            let t = i as f32 / 4.0 + tick as f32 / 25.0 + TAU * (q as f32 / 3.0);
+                            (x + t.cos() * 0.2, y + i as f32 / 10.0 + t.sin() * 0.03)
+                        };
+
+                        let n = ((30.0 * scale.unwrap_or_default().0.y()) as usize).min(30);
+                        for i in 0..n {
+                            color.0[1] += 2;
+                            color.0[2] += 2;
+
+                            let (x0, y0) = p(i);
+                            let (x1, y1) = p(i + 1);
+                            draw_line(x0, y0, x1, y1, 0.2 * ((n - i) as f32 / 30.0), color);
+                        }
+                    }
                 }
                 Art::FireBow(r) | Art::Bow(r) => {
                     push_model_matrix(gl);
@@ -4004,6 +4759,82 @@ impl Drawer {
             &pos       = &Vec2
         {
             health_bar(vec2(1.0, 0.2), hp.ratio(), pos);
+        });
+
+        system!(ecs, _,
+            &pos                                = &Vec2
+            &Surprised { start_tick, duration } = &_
+        {
+            let end_tick = start_tick + duration;
+            let st = ((tick as f32 - start_tick as f32) / 10.0).min(1.0);
+            let dt = ((end_tick as f32 - tick as f32) / 10.0).min(1.0).min(st);
+            if dt < 0.0 {
+                continue
+            }
+
+            let t = tick as f32 / 10.0;
+            let pos = pos + vec2(0.0, 1.2 + t.sin() * 0.425 * dt);
+            draw_rectangle(
+                pos.x() - 0.05,
+                pos.y(),
+                0.1,
+                0.1,
+                RED
+            );
+            draw_triangle(
+                pos + vec2( 0.0, 0.15),
+                pos + vec2(-0.12, 0.75),
+                pos + vec2( 0.12, 0.75),
+                RED
+            );
+            draw_triangle(
+                pos + vec2( 0.0, 0.15),
+                pos + vec2(-0.12, 0.75),
+                pos + vec2(-0.05, 0.15),
+                RED
+            );
+            draw_triangle(
+                pos + vec2( 0.0, 0.15),
+                pos + vec2( 0.12, 0.75),
+                pos + vec2( 0.05, 0.15),
+                RED
+            );
+        });
+
+        system!(ecs, _,
+            &pos                                 = &Vec2
+            &Starstruck { start_tick, duration } = &_
+        {
+            let end_tick = start_tick + duration;
+            let st = ((tick as f32 - start_tick as f32) / 10.0).min(1.0);
+            let dt = ((end_tick as f32 - tick as f32) / 10.0).min(1.0).min(st);
+            if dt < 0.0 {
+                continue
+            }
+
+            for i in 0..3 {
+                let t = (tick + i * 12) as f32 / 10.0;
+                let pos = pos + vec2(t.cos() * 0.6 * dt, 1.0 + t.sin() * 0.225 * dt);
+                for v in circle_points(5).map(|v| Rot(tick as f32 / 25.0).apply(v)) {
+                    let (inner0, inner1, outer) = (
+                        v * 0.06 * dt,
+                        Rot(TAU / 5.0).apply(v) * 0.06 * dt,
+                        Rot(TAU / 10.0).apply(v) * 0.15 * dt,
+                    );
+                    draw_triangle(
+                        pos + inner0,
+                        pos + inner1,
+                        pos + outer,
+                        GOLD
+                    );
+                    draw_triangle(
+                        pos + inner0,
+                        pos + inner1,
+                        pos,
+                        GOLD
+                    );
+                }
+            }
         });
 
         #[cfg(feature = "show-collide")]
