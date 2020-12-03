@@ -4598,8 +4598,8 @@ impl Drawer {
         if let Some((speaker, msg, start_tick)) =
             game.speech.iter().filter(|(_, _, t)| *t < game.tick).last()
         {
-            let w = screen_width() * 0.8;
-            let x = screen_width() * 0.1;
+            let w = screen_width() * 0.6;
+            let x = screen_width() * 0.2;
             let y = self
                 .cam
                 .world_to_screen(vec2(1.0, 1.2) + self.cam.target - self.screen * vec2(1.0, -1.0))
@@ -4636,7 +4636,7 @@ impl Drawer {
     fn sprites(&mut self, Game { ecs, tick, .. }: &Game) {
         let tick = *tick;
         let Self { screen, sprites, cam, .. } = self;
-        cam.zoom = vec2(1.0, screen_width() / screen_height()) / 7.8;
+        cam.zoom = vec2(1.0, screen_width() / screen_height()) / 11.8;
         set_camera(*cam);
         *screen = cam.screen_to_world(vec2(screen_width(), screen_height())) - cam.target;
         let top_left = cam.target - *screen;
