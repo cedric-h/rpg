@@ -4663,6 +4663,10 @@ impl Drawer {
         let flip_y = vec2(1.0, -1.0);
         let screen_size = *screen * flip_y * 2.0;
 
+        fn draw_circle(x: f32, y: f32, r: f32, color: Color) {
+            draw_poly(x, y, 20, r, 0.0, color);
+        }
+
         sprites.extend(
             ecs.query::<(&_, &_, Option<&ZOffset>, Option<&Rot>, Option<&Scale>, Option<&Heatable>)>()
                 .iter()
