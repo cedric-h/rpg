@@ -3879,24 +3879,9 @@ impl Speaker {
 
     fn color(self) -> Color {
         match self {
-            Speaker::Player => {
-                let mut b = BLUE;
-                b.0[1] -= 85;
-                b.0[2] -= 55;
-                b
-            }
-            Speaker::Rocky => {
-                let mut r = RED;
-                r.0[0] -= 85;
-                r.0[1] -= 25;
-                r
-            }
-            Speaker::Elmer => {
-                let mut g = GOLD;
-                g.0[0] -= 55;
-                g.0[1] -= 85;
-                g
-            }
+            Speaker::Player => BLUE,
+            Speaker::Rocky => RED,
+            Speaker::Elmer => GOLD,
         }
     }
 }
@@ -4618,8 +4603,8 @@ impl Drawer {
 
             let font_size = (w / 25.0).round();
             let h = font_size * 5.0;
-            draw_rectangle(x, y, w, -h, Color([225, 245, 245, 175]));
-            draw_rectangle(x - 4.0, y + 4.0, w + 8.0, -h - 8.0, Color([225, 245, 245, 30]));
+            draw_rectangle(x, y, w, -h, Color([0, 30, 15, 175]));
+            draw_rectangle(x - 4.0, y + 4.0, w + 8.0, -h - 8.0, Color([0, 30, 15, 30]));
             let up_to_byte = msg
                 .char_indices()
                 .nth((game.tick - start_tick) as usize / 3)
