@@ -1366,6 +1366,7 @@ enum Art {
     Rocky,
     Elmer,
     Bramble,
+    BrambleShadow,
     Consumable(Consumable),
     Trinket(Trinket),
     Fireball,
@@ -1373,23 +1374,25 @@ enum Art {
     Harp,
     FireBow(f32),
     Bow(f32),
+    Star,
+    Bam,
+    Rock,
     Xp,
     BigLog,
     Compass,
-    Scarecrow,
     RedArrow,
+    SwordPointer,
     Arrow,
     Chest,
     Lockbox,
     Book,
-    TripletuftedTerrorworm,
-    VioletVagabond,
     Goblin,
     Tree,
-    Npc,
+    TreeShadow,
+    TreeOutline,
+    TreeTrunk,
     Sword,
     FireWand,
-    Post,
 }
 impl Art {
     fn z_offset(self) -> f32 {
@@ -1409,11 +1412,12 @@ impl Art {
             Art::Trinket(t) => t.name(),
             Art::Circle(_, _) => "Circle",
             Art::Bramble => "Bramble",
+            Art::BrambleShadow => "Bramble Shadow",
             Art::Fireball => "Fireball",
             Art::Arrow => "Arrow",
             Art::Xp => "Xp",
-            Art::Scarecrow => "Scarecrow",
             Art::Goblin => "Goblin",
+            Art::SwordPointer => "Sword Pointer",
             Art::RedArrow => "Red Arrow",
             Art::Chest => "Chest",
             Art::BigLog => "Big Log",
@@ -1423,41 +1427,55 @@ impl Art {
             Art::Lockbox => "Lockbox",
             Art::Book => "Grey Book",
             Art::Compass => "Compass",
-            Art::TripletuftedTerrorworm => "Tripletufted Terrorworm",
-            Art::VioletVagabond => "Violet Vagabond",
-            Art::Tree => "Tree",
-            Art::Npc => "Npc",
+            Art::Star => "Star",
+            Art::Bam => "Bam",
+            Art::Rock => "Rock",
+            Art::Tree | Art::TreeOutline | Art::TreeShadow | Art::TreeTrunk => "Tree",
             Art::Sword => "Sword",
             Art::FireWand => "Fire Wand",
-            Art::Post => "Post",
+        }
+    }
+
+    fn tex_coords(self) -> (u8, u8, u8, u8) {
+        match self {
+            Art::Circle(r, _) => (0, 0, r.ceil() as u8, r.ceil() as u8),
+            Art::Hero => (0, 0, 1, 1),
+            Art::Rocky => (1, 0, 1, 1),
+            Art::Elmer => (2, 0, 1, 1),
+            Art::Goblin => (3, 0, 1, 1),
+            Art::Harp => (4, 0, 1, 1),
+            Art::Xp => (5, 0, 1, 1),
+            Art::Lockbox => (0, 1, 1, 1),
+            Art::Compass => (1, 1, 1, 1),
+            Art::Book => (2, 1, 1, 1),
+            Art::Chest => (3, 1, 2, 1),
+            Art::Star => (5, 1, 1, 1),
+            Art::Bam => (6, 1, 1, 1),
+            Art::Rock => (7, 1, 1, 1),
+            Art::BrambleShadow => (8, 1, 1, 1),
+            Art::Tree => (0, 2, 4, 4),
+            Art::TreeOutline => (4, 2, 4, 4),
+            Art::TreeShadow => (8, 4, 2, 2),
+            Art::TreeTrunk => (10, 4, 2, 2),
+            Art::BigLog => (10, 1, 6, 2),
+            Art::Bramble => (0, 9, 1, 3),
+            Art::SwordPointer => (0, 12, 1, 1),
+            Art::RedArrow => (0, 13, 1, 1),
+            Art::Sword => (1, 12, 1, 2),
+            Art::Arrow => (3, 13, 2, 1),
+            Art::Fireball => (0, 14, 2, 1),
+            Art::FireWand => (7, 12, 1, 2),
+            Art::Bow(_) => (0, 15, 2, 2),
+            Art::FireBow(_) => (0, 17, 2, 2),
+            Art::Consumable(_) | Art::Trinket(_) => (0, 0, 0, 0),
         }
     }
 
     fn bounding(self) -> f32 {
         match self {
-            Art::Book | Art::RedArrow | Art::Chest | Art::Npc | Art::Sword | Art::FireWand => {
-                GOLDEN_RATIO / 2.0
-            }
-            Art::Elmer
-            | Art::Rocky
-            | Art::Lockbox
-            | Art::Compass
-            | Art::Fireball
-            | Art::Hero
-            | Art::Bramble
-            | Art::Arrow => 0.5,
-            Art::Xp => 0.05,
-            Art::TripletuftedTerrorworm
-            | Art::VioletVagabond
-            | Art::Scarecrow
-            | Art::Harp
-            | Art::FireBow(_)
-            | Art::Bow(_) => 0.4,
-            Art::Goblin => 0.3,
-            Art::Circle(r, _) => r,
-            Art::Tree | Art::BigLog => 3.0,
-            Art::Post => 1.05,
+            Art::Circle(r, _) => r / 2.0,
             Art::Trinket(_) | Art::Consumable(_) => 0.0,
+            other => other.tex_coords().2.max(other.tex_coords().3) as f32 / 2.0,
         }
     }
 }
@@ -2993,16 +3011,11 @@ impl RunPath {
             start: Vec2,
             left: Vec2,
             right: Vec2,
-            end: Vec2
+            end: Vec2,
         }
         impl BezierCurve {
             fn new(start: BezierPoint, end: BezierPoint) -> Self {
-                Self {
-                    start: start.pos(),
-                    left: start.right(),
-                    right: end.left(),
-                    end: end.pos(),
-                }
+                Self { start: start.pos(), left: start.right(), right: end.left(), end: end.pos() }
             }
 
             fn point(&self, t: f32) -> Vec2 {
@@ -3024,8 +3037,7 @@ impl RunPath {
         }
 
         fn path_len(path: &[BezierPoint]) -> f32 {
-            path
-                .windows(2)
+            path.windows(2)
                 .filter_map(|pair| match pair {
                     &[start, end] => Some(BezierCurve::new(start, end).len()),
                     _ => None,
@@ -3040,7 +3052,7 @@ impl RunPath {
                 let segment = BezierCurve::new(start, end);
                 let len = segment.len() / total;
                 if so_far + len >= t {
-                    return segment.point((t - so_far) / len)
+                    return segment.point((t - so_far) / len);
                 }
                 so_far += len;
             }
@@ -3095,7 +3107,7 @@ struct Surprised {
 async fn main() {
     let mut ecs = hecs::World::new();
     let mut pad = StaticTypeMap::with_capacity(100);
-    let mut drawer = Drawer::new();
+    let mut drawer = Drawer::new().await;
     let mut waffle = Waffle::new();
     let mut fireballs = Bullets::new();
     let mut levels = Levels::new(&mut ecs);
@@ -3143,20 +3155,14 @@ async fn main() {
         pad.remove().ok_or("who deleted the game map smh")
     }
 
-    ecs.spawn((
-        gmap.rocky_enter.last().map(|bp| bp.pos()).unwrap_or_default(),
-        Art::Circle(0.2, GRAY),
-    ));
+    ecs.spawn((gmap.rocky_enter.last().map(|bp| bp.pos()).unwrap_or_default(), Art::Rock));
 
     for &(x, y) in &gmap.trees {
-        ecs.spawn((vec2(x, y - 0.4), Art::Tree));
+        ecs.spawn((vec2(x, y - 0.4), Art::Tree, ZOffset(-1.00)));
+        ecs.spawn((vec2(x - 0.02, y - 0.4), Art::TreeOutline, ZOffset(-0.01)));
+        ecs.spawn((vec2(x, y - 0.4), Art::TreeTrunk));
 
-        let shadow_r = 0.82;
-        ecs.spawn((
-            vec2(x, y - shadow_r),
-            Art::Circle(shadow_r, Color([45, 110, 92, 255])),
-            ZOffset(1000.0),
-        ));
+        ecs.spawn((vec2(x, y - 1.0), Art::TreeShadow, ZOffset(1000.0)));
     }
 
     for &MapCircleCollider { pos: (x, y), radius } in &gmap.circles {
@@ -3446,14 +3452,18 @@ async fn main() {
                 start_tick: *tick,
                 plants: [(); 8].map(|_| {
                     ecs.spawn((
-                        Vec2::from(c.next().unwrap()),
+                        Vec2::from(c.next().unwrap()) - vec2(0.0, 0.25),
                         Art::Bramble,
                         Phys::new().hitbox(0.3).pushbox_centered(0.6),
                         Health::full(1),
                     ))
                 }),
                 pads: [(); 8].map(|_| {
-                    ecs.spawn((Vec2::from(c.next().unwrap()) - vec2(0.0, 0.4), ZOffset(999.0)))
+                    ecs.spawn((
+                        Art::BrambleShadow,
+                        Vec2::from(c.next().unwrap()) - vec2(0.0, 0.4),
+                        ZOffset(999.0),
+                    ))
                 }),
             }
         }
@@ -3462,13 +3472,14 @@ async fn main() {
             let tick = g.tick;
 
             for (&plant, &pad) in self.plants.iter().zip(&self.pads) {
-                let scale = ((tick - self.start_tick) as f32 / 300.0).min(1.0);
+                let scale = ((tick - self.start_tick) as f32 / 125.0).min(1.0);
                 let mut pad_color = DARKGREEN;
                 pad_color.0[1] -= 30;
                 pad_color.0[2] -= 30;
                 pad_color.0[3] = 100;
                 if !g.dead(plant) {
-                    g.ecs.insert_one(pad, Art::Circle(0.2 + 0.3 * scale, pad_color))?;
+                    let p = g.pos(plant);
+                    g.ecs.insert(pad, (p - vec2(0.0, scale / 4.0), Scale(vec2(1.0, 1.0) * scale)))?;
                     g.ecs.insert_one(plant, Scale(vec2(1.0, scale)))?;
                 }
             }
@@ -3583,7 +3594,7 @@ async fn main() {
         req: Box::new(move |g, pad| {
             Ok(if let Some(brambles) = pad.get::<Brambles>() {
                 brambles.update(g)?;
-                brambles.start_tick + 300 < g.tick
+                brambles.start_tick + 125 < g.tick
             } else {
                 false
             })
@@ -3638,7 +3649,7 @@ async fn main() {
             if let Some(brambles) = pad.get::<Brambles>() {
                 let f = brambles.plants[2];
                 if g.ecs.contains(f) {
-                    gi.push((Art::Sword, g.pos(f) + vec2(0.0, 2.0)));
+                    gi.push((Art::SwordPointer, g.pos(f) + vec2(0.0, 2.0)));
                 }
             }
             Ok(())
@@ -4307,9 +4318,7 @@ impl Quests {
             let bob = math::smoothstep((g.tick as f32 / 10.0).sin()) * 0.2;
             let v = Rot(rot.0 - FRAC_PI_2).vec2();
             pos += (v * 0.67 * scale) + (v * bob);
-            or_err!(g
-                .ecs
-                .insert(ent, (art, pos, rot, ZOffset(-999.0), Scale(vec2(1.0, 0.4) * scale))));
+            or_err!(g.ecs.insert(ent, (art, pos, rot, ZOffset(-999.0))));
         }
 
         if let Ok(mut pos) = g.ecs.get_mut::<Vec2>(self.icon_ent) {
@@ -4568,14 +4577,16 @@ fn health_bar(size: Vec2, ratio: f32, pos: Vec2) -> Color {
 type SpriteData = (Vec2, Art, ZOffset, Option<Rot>, Option<Scale>, Option<Heatable>);
 struct Drawer {
     sprites: Vec<SpriteData>,
+    spritesheet: Texture2D,
     damage_labels: DamageLabelBin,
     cam: Camera2D,
     screen: Vec2,
 }
 impl Drawer {
-    fn new() -> Self {
+    async fn new() -> Self {
         Self {
             sprites: Vec::with_capacity(1000),
+            spritesheet: load_texture("spritesheet.png").await,
             cam: Default::default(),
             screen: Vec2::zero(),
             damage_labels: DamageLabelBin::new(),
@@ -4635,7 +4646,7 @@ impl Drawer {
 
     fn sprites(&mut self, Game { ecs, tick, .. }: &Game) {
         let tick = *tick;
-        let Self { screen, sprites, cam, .. } = self;
+        let Self { spritesheet, screen, sprites, cam, .. } = self;
         cam.zoom = vec2(1.0, screen_width() / screen_height()) / 11.8;
         set_camera(*cam);
         *screen = cam.screen_to_world(vec2(screen_width(), screen_height())) - cam.target;
@@ -4653,19 +4664,17 @@ impl Drawer {
 
         #[cfg(feature = "show-culling")]
         {
-            let (x, y) = (cam.target - screen).into();
-            let (w, h) = (screen * 2.0).into();
+            let (x, y) = (cam.target - *screen).into();
+            let (w, h) = (*screen * 2.0).into();
             draw_rectangle_lines(x, y, w, h, 0.1, RED);
         }
-
-        let gl = unsafe { get_internal_gl().quad_gl };
-
-        let flip_y = vec2(1.0, -1.0);
-        let screen_size = *screen * flip_y * 2.0;
 
         fn draw_circle(x: f32, y: f32, r: f32, color: Color) {
             draw_poly(x, y, 20, r, 0.0, color);
         }
+
+        let flip_y = vec2(1.0, -1.0);
+        let screen_size = *screen * flip_y * 2.0;
 
         sprites.extend(
             ecs.query::<(&_, &_, Option<&ZOffset>, Option<&Rot>, Option<&Scale>, Option<&Heatable>)>()
@@ -4684,321 +4693,84 @@ impl Drawer {
             float_cmp(b, a, |(pos, art, z, ..)| pos.y() + art.z_offset() + z.0)
         });
         for (pos, art, _, rot, scale, heat) in sprites.drain(..) {
-            let push_model_matrix = |gl: &mut QuadGl| {
-                gl.push_model_matrix(
-                    glam::Mat4::from_translation(glam::vec3(pos.x(), pos.y(), 0.0))
-                        * rot.map(|Rot(r)| glam::Mat4::from_rotation_z(r)).unwrap_or_default()
-                        * scale
-                            .map(|Scale(v)| glam::Mat4::from_scale(glam::vec3(v.x(), v.y(), 1.0)))
-                            .unwrap_or_default(),
-                );
-            };
-
-            let (x, y) = pos.into();
-            let rect = |color: Color, w: f32, h: f32| {
-                draw_rectangle(x - w / 2.0, y, w, h, color);
-            };
-
-            fn arrow(x: f32) {
-                for &f in &[1.0, -1.0] {
-                    draw_triangle(
-                        vec2(0.35 + x, 0.01 * f),
-                        vec2(0.2 + x, 0.12 * f),
-                        vec2(0.0 + x, 0.12 * f),
-                        RED,
-                    );
-                    draw_triangle(
-                        vec2(0.35 + x, 0.01 * f),
-                        vec2(0.05 + x, 0.01 * f),
-                        vec2(0.0 + x, 0.12 * f),
-                        RED,
-                    );
-                }
-
-                draw_line(1.05 + x, 0.0, 0.05 + x, 0.0, 0.08, DARKBROWN);
-                draw_triangle(
-                    vec2(1.34 + x, 0.0),
-                    vec2(1.1 + x, -0.105),
-                    vec2(1.1 + x, 0.105),
-                    GRAY,
-                );
-                draw_triangle(
-                    vec2(0.975 + x, 0.0),
-                    vec2(1.1 + x, -0.105),
-                    vec2(1.1 + x, 0.105),
-                    GRAY,
-                );
-            }
-
-            match art {
-                Art::Hero => rect(BLUE, 1.0, 1.0),
-                Art::Rocky => rect(RED, 1.0, 1.0),
-                Art::Elmer => rect(GOLD, 1.0, 1.0),
-                Art::Scarecrow => rect(GOLD, 0.8, 0.8),
-                Art::TripletuftedTerrorworm => rect(WHITE, 0.8, 0.8),
-                Art::VioletVagabond => rect(VIOLET, 0.8, 0.8),
-                Art::Goblin => rect(DARKGREEN, 0.6, 0.6),
-                Art::Npc => rect(GREEN, 1.0, GOLDEN_RATIO),
-                Art::Circle(r, color) => {
-                    draw_circle(x, y + r, r, color);
-                }
-                Art::Bramble => {
-                    for q in 0..3 {
-                        let mut color = DARKGREEN;
-                        color.0[1] -= 20;
-                        color.0[2] -= 20;
-
-                        let p = |i| {
-                            let t = i as f32 / 4.0 + tick as f32 / 25.0 + TAU * (q as f32 / 3.0);
-                            (x + t.cos() * 0.2, y + i as f32 / 10.0 + t.sin() * 0.03)
-                        };
-
-                        let n = ((30.0 * scale.unwrap_or_default().0.y()) as usize).min(30);
-                        for i in 0..n {
-                            color.0[1] += 2;
-                            color.0[2] += 2;
-
-                            let (x0, y0) = p(i);
-                            let (x1, y1) = p(i + 1);
-                            draw_line(x0, y0, x1, y1, 0.2 * ((n - i) as f32 / 30.0), color);
-                        }
-                    }
-                }
-                Art::FireBow(r) | Art::Bow(r) => {
-                    push_model_matrix(gl);
-                    let (body, string) = match art {
-                        Art::FireBow(_) => (DARKGRAY, Color([150, 50, 0, 255])),
-                        _ => (BROWN, LIGHTGRAY),
-                    };
-
-                    draw_line(-0.1, -1.0, -0.1 - r * 0.3, 0.0, 0.035, string);
-                    draw_line(-0.1, 1.0, -0.1 - r * 0.3, 0.0, 0.035, string);
-
-                    if let Art::Bow(r) = art {
-                        if r > 0.0 {
-                            arrow(-r);
-                        }
-                    }
-
-                    draw_line(-0.10, -1.0, 0.03, -1.1, 0.045, body);
-                    draw_line(-0.10, -1.0, 0.2, -0.4, 0.105, body);
-                    draw_line(0.25, -0.1, 0.2, -0.4, 0.095, body);
-                    draw_line(0.25, -0.1, 0.1, 0.0, 0.075, body);
-                    draw_line(0.25, 0.1, 0.1, 0.0, 0.075, body);
-                    draw_line(0.25, 0.1, 0.2, 0.4, 0.095, body);
-                    draw_line(-0.10, 1.0, 0.2, 0.4, 0.105, body);
-                    draw_line(-0.10, 1.0, 0.03, 1.1, 0.045, body);
-                    gl.pop_model_matrix();
-                }
-                Art::Harp => {
-                    draw_line(x + 0.3, y + 0.1, x + 0.3, y + 0.6, 0.035, LIGHTGRAY);
-                    draw_line(x + 0.2, y + 0.1, x + 0.2, y + 0.5, 0.035, LIGHTGRAY);
-                    draw_line(x + 0.1, y + 0.2, x + 0.1, y + 0.5, 0.035, LIGHTGRAY);
-
-                    draw_line(x + 0.4, y, x + 0.4, y + 0.6, 0.075, GOLD);
-                    draw_line(x - 0.15, y + 0.35, x + 0.4, y, 0.1, GOLD);
-                    draw_line(x + 0.1, y + 0.5, x + 0.4, y + 0.6, 0.1, GOLD);
-                    draw_line(x + 0.1, y + 0.5, x - 0.05, y + 0.3, 0.075, GOLD);
-                }
-                Art::Chest => {
-                    let (w, h) = (vec2(GOLDEN_RATIO, 1.0) * 0.8).into();
-                    draw_rectangle(x - w / 2.0, y, w, h, BROWN);
-                    draw_line(x - w / 2.0, y + 0.435, x + w / 2.0, y + 0.435, 0.05, DARKGRAY);
-                    draw_rectangle_lines(x - w / 2.0, y, w, h, 0.1, DARKGRAY);
-                    draw_circle(x, y + h / 2.0, 0.10, GOLD);
-                    draw_circle(x, y + h / 2.0, 0.06, DARKGRAY);
-                    draw_rectangle(x - 0.1, y + h / 2.0 - 0.135, 0.2, 0.135, GOLD);
-                }
-                Art::Compass => {
-                    draw_circle(x, y + 0.40, 0.4000, DARKGRAY);
-                    draw_circle(x, y + 0.40, 0.3055, GRAY);
-                    draw_triangle(
-                        vec2(x - 0.085, y + 0.4),
-                        vec2(x + 0.085, y + 0.4),
-                        vec2(x, y + 0.4 - 0.25),
-                        DARKGRAY,
-                    );
-                    draw_triangle(
-                        vec2(x - 0.085, y + 0.4),
-                        vec2(x + 0.085, y + 0.4),
-                        vec2(x, y + 0.65),
-                        LIGHTGRAY,
-                    );
-                }
-                Art::Book => {
-                    let w = 0.8;
-                    draw_rectangle(x - w / 2.0, y, w, w, DARKGRAY);
-                    let w = 0.6;
-                    draw_rectangle(x - w / 2.0, y + 0.1, w, w, GRAY);
-
-                    let y = y + 0.2;
-                    let (w, h, r) = (0.8 * 0.1, GOLDEN_RATIO * 0.8 * 0.1, 0.4 * 0.1);
-                    draw_circle(x, y + r, r, DARKGRAY);
-                    draw_rectangle(x - w / 2.0, y + r, w, h, DARKGRAY);
-
-                    draw_circle(x + 0.80 * 0.1, y + 2.2 * 0.1, 0.8 * 0.1, LIGHTGRAY);
-                    draw_circle(x + 0.16 * 0.1, y + 3.0 * 0.1, 1.0 * 0.1, LIGHTGRAY);
-                    draw_circle(x - 0.80 * 0.1, y + 2.5 * 0.1, 0.9 * 0.1, LIGHTGRAY);
-                    draw_circle(x - 0.16 * 0.1, y + 2.0 * 0.1, 0.8 * 0.1, LIGHTGRAY);
-                }
-                Art::Lockbox => {
-                    let (w, h) = (0.8, 0.435);
-                    draw_circle(x, y + h, 0.4, DARKGRAY);
-                    draw_circle(x, y + h, 0.4 - 0.0945, GRAY);
-                    draw_rectangle(x - w / 2.0, y, w, h, GRAY);
-                    draw_rectangle_lines(x - w / 2.0, y, w, h, 0.0945 * 2.0, DARKGRAY);
-                    let lock = 1.35;
-                    draw_circle(x, y + h - 0.08, 0.10 * lock, LIGHTGRAY);
-                    draw_circle(x, y + h - 0.08, 0.06 * lock, DARKGRAY);
-                    draw_rectangle(
-                        x - 0.1 * lock,
-                        y + h - 0.201 * lock,
-                        0.2 * lock,
-                        0.135 * lock,
-                        LIGHTGRAY,
-                    );
-                }
-                Art::BigLog => {
-                    let (w, h) = (3.0, 2.0);
-                    draw_rectangle(x - w / 2.0, y, w, h, BROWN);
-                    draw_circle(x - w / 2.0, y + h / 2.0, h / 2.0, BROWN);
-                    draw_circle(x + w / 2.0, y + h / 2.0, h / 2.0, BROWN);
-
-                    draw_circle(x - w / 2.0, y + h / 2.0, h / 2.0 * 0.8, BEIGE);
-                    draw_circle(x - w / 2.0, y + h / 2.0, h / 2.0 * 0.6, DARKBROWN);
-                }
-                Art::Tree => {
-                    let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
-                    draw_circle(x, y + r, r, BROWN);
-                    draw_rectangle(x - w / 2.0, y + r, w, h, BROWN);
-                    let mut color = DARKGREEN;
-                    draw_circle(x + 0.80, y + 2.2, 0.8, color);
-                    color.0[0] += 10;
-                    color.0[1] += 10;
-                    color.0[2] += 10;
-                    draw_circle(x + 0.16, y + 3.0, 1.0, color);
-                    color.0[0] += 10;
-                    color.0[1] += 10;
-                    color.0[2] += 10;
-                    draw_circle(x - 0.80, y + 2.5, 0.9, color);
-                    color.0[0] += 10;
-                    color.0[1] += 10;
-                    color.0[2] += 10;
-                    draw_circle(x - 0.16, y + 2.0, 0.8, color);
-                }
-                Art::Post => {
-                    let (w, h, r) = (0.8, GOLDEN_RATIO * 0.8, 0.4);
-                    draw_circle(x, y + r, r, BROWN);
-                    draw_rectangle(x - w / 2.0, y + r, w, h, BROWN);
-                    draw_circle(x, y + h + r, 0.4, BEIGE);
-                }
-                Art::Xp => {
-                    let mut color = VIOLET;
-                    color.0[3] = 85;
-                    let o = (x + y + tick as f32 / 10.0).sin() * 0.08;
-                    draw_circle(x, y + 0.05 + o, 0.1, color);
-                    draw_circle(x, y + 0.05 + o * 1.1, 0.05, color);
-                }
-                Art::Fireball => {
-                    push_model_matrix(gl);
-                    let mut color = ORANGE;
-                    for q in 0..10 {
-                        let i = q % 5;
-                        let w = (5 - i) as f32 / 5.0 * 0.1 + 0.2;
-                        color.0[1] = 120 + 70 * (i as f32 / 5.0) as u8;
-                        color.0[2] = 20 + 30 * (i as f32 / 5.0) as u8;
-                        color.0[3] = 40 + 53 * ((5 - i) as f32 / 5.0) as u8;
-                        draw_circle(
-                            w / -2.0 - i as f32 / 8.0 - q as f32 / 85.0,
-                            ((tick + q * 4) as f32 / 5.0).sin() * (i as f32 / 4.5).max(0.05) * 0.25,
-                            w,
-                            color,
-                        );
-                    }
-                    gl.pop_model_matrix();
-                }
-                Art::Arrow => {
-                    push_model_matrix(gl);
-                    arrow(-1.34);
-                    gl.pop_model_matrix();
-                }
-                Art::RedArrow => {
-                    push_model_matrix(gl);
-                    draw_triangle(vec2(0.11, 0.0), vec2(-0.11, 0.0), vec2(0.00, GOLDEN_RATIO), RED);
-                    draw_triangle(
-                        vec2(-0.225, 0.85),
-                        vec2(0.225, 0.85),
-                        vec2(0.00, GOLDEN_RATIO),
-                        RED,
-                    );
-                    gl.pop_model_matrix();
-                }
-                Art::FireWand => {
-                    push_model_matrix(gl);
-                    draw_line(0.235, 1.20, -0.010, 0.25, 0.06, DARKGRAY);
-                    draw_line(0.235, 1.20, -0.065, 0.55, 0.05, DARKGRAY);
-                    draw_line(-0.140, 1.30, -0.010, 0.25, 0.10, DARKGRAY);
-                    draw_poly(0.05, 1.15, 5, 0.18, 0.0, DARKGRAY);
-                    draw_circle(0.05, 1.15, 0.11, RED);
-                    draw_circle(0.05, 1.15, 0.08 * (tick as f32 / 20.0).sin(), BLACK);
-                    /*
-                    draw_poly(-0.1, 0.76, 5, 0.18, 0.0, DARKGRAY);
-                    draw_circle(-0.1, 0.76, 0.11, RED);
-                    draw_circle(-0.1, 0.76, 0.08 * (tick as f32 / 20.0).sin(), BLACK);
-                    draw_line(0.0, 0.6, 0.3, 1.0, 0.1, DARKGRAY);
-                    draw_line(-0.3, 0.9, 0.3, 1.0, 0.1, DARKGRAY);
-                    draw_line(0.0, 0.0, 0.2, 0.7, 0.07, DARKGRAY);
-                    draw_line(0.0, 0.6, 0.2, 0.7, 0.08, DARKGRAY);
-                    draw_line(0.0, 0.6, 0.3, 1.0, 0.1, GRAY);
-                    draw_line(-0.3, 0.9, 0.3, 1.0, 0.1, GRAY);
-                    */
-                    gl.pop_model_matrix()
-                }
-                Art::Sword => {
-                    push_model_matrix(gl);
-                    draw_triangle(
-                        vec2(0.075, 0.0),
-                        vec2(-0.075, 0.0),
-                        vec2(0.00, GOLDEN_RATIO),
-                        DARKBROWN,
-                    );
-                    let mut gray = GRAY;
+            let subtex = |x: u8, y: u8, w: u8, h: u8| {
+                let s = match art {
+                    Art::Bramble => vec2(1.0, 1.0),
+                    _ => scale.unwrap_or_default().0,
+                };
+                let (wf, hf) = (w as f32, h as f32);
+                let screen_pos = match art {
+                    Art::Bow(_) | Art::FireBow(_) => pos + vec2(wf / -3.0, hf * 0.5) * s,
+                    Art::Arrow | Art::Fireball => pos + vec2(-wf, hf * 0.5),
+                    Art::Xp => pos + vec2(0.0, (pos.x() + pos.y() + tick as f32 / 10.0).sin() * 0.08),
+                    _ => pos + vec2(wf / -2.0, hf) * s,
+                };
+                draw_texture_ex(
+                    *spritesheet,
+                    screen_pos.x(),
+                    screen_pos.y(),
                     if let Some(Heatable { active: true, heat, lose_heat_tick, .. }) = heat {
                         fn lerp(a: u8, b: u8, t: f32) -> u8 {
                             a.saturating_add(((a - b) as f32 * t) as u8)
                         }
                         fn gray_at(heat: u8) -> u8 {
-                            GRAY.0[0].saturating_add(heat.saturating_mul(heat))
+                            WHITE.0[0].saturating_add(heat.saturating_mul(heat))
                         }
 
-                        gray.0[0] = lerp(
+                        let mut red_white = WHITE;
+                        red_white.0[0] = lerp(
                             gray_at(heat),
                             gray_at(heat.saturating_sub(1)),
                             (lose_heat_tick - tick) as f32 / 100.0,
                         );
-                    }
+                        red_white
+                    } else {
+                        WHITE
+                    },
+                    DrawTextureParams {
+                        dest_size: Some(s * vec2(w as f32, -(h as f32))),
+                        source: Some(Rect {
+                            x: x as f32 * 204.0,
+                            y: y as f32 * 204.0,
+                            w: w as f32 * 204.0,
+                            h: h as f32 * 204.0,
+                        }),
+                        rotation: rot.unwrap_or_default().0,
+                        pivot: Some(pos),
+                    },
+                );
+            };
 
-                    for &dir in &[-1.0, 1.0] {
-                        draw_triangle(
-                            vec2(0.00, GOLDEN_RATIO),
-                            vec2(dir * 0.1, 0.35),
-                            vec2(0.20 * dir, 1.35),
-                            gray,
-                        )
-                    }
-                    draw_triangle(
-                        vec2(-0.1, 0.35),
-                        vec2(0.1, 0.35),
-                        vec2(0.00, GOLDEN_RATIO),
-                        gray,
-                    );
-
-                    let (x, y) = vec2(-0.225, 0.400).into();
-                    let (w, z) = vec2(0.225, 0.400).into();
-                    draw_line(x, y, w, z, 0.135, DARKGRAY);
-                    gl.pop_model_matrix()
+            let anim_rev = |from: u8, to: u8, tick: u32| -> u8 {
+                let max = (to - from) as u32;
+                let t = (tick % (max * 2)) as u8;
+                let max = max as u8;
+                if t >= max {
+                    to + max - t - 1
+                } else {
+                    from + t
                 }
+            };
+
+            match art {
+                Art::Circle(mut r, color) => {
+                    r *= scale.unwrap_or_default().0.y();
+                    draw_circle(pos.x(), pos.y() + r, r, color)
+                }
+                Art::Xp => subtex(5 + (tick / 6 % 5) as u8, 0, 1, 1),
+                Art::Bramble => match scale.map(|s| s.0.y()).filter(|&s| s < 1.0) {
+                    Some(s) => subtex((s * 20.0).floor() as _, 6, 1, 3),
+                    None => subtex(anim_rev(0, 20, tick / 10), 9, 1, 3),
+                },
+                Art::Fireball => subtex((tick / 6 % 10) as u8 * 2, 14, 2, 1),
+                Art::FireWand => subtex(anim_rev(7, 17, tick / 6), 12, 1, 2),
+                Art::Bow(r) => subtex((r * 10.0).floor() as u8 * 2, 15, 2, 2),
+                Art::FireBow(r) => subtex((r * 10.0).floor() as u8 * 2, 17, 2, 2),
                 Art::Consumable(_) | Art::Trinket(_) => {}
+                other => {
+                    let (x, y, w, h) = other.tex_coords();
+                    subtex(x, y, w, h)
+                }
             };
         }
 
@@ -5023,31 +4795,23 @@ impl Drawer {
 
             let t = tick as f32 / 10.0;
             let pos = pos + vec2(0.0, 1.2 + t.sin() * 0.425 * dt);
-            draw_rectangle(
-                pos.x() - 0.05,
-                pos.y(),
-                0.1,
-                0.1,
-                RED
-            );
-            draw_triangle(
-                pos + vec2( 0.0, 0.15),
-                pos + vec2(-0.12, 0.75),
-                pos + vec2( 0.12, 0.75),
-                RED
-            );
-            draw_triangle(
-                pos + vec2( 0.0, 0.15),
-                pos + vec2(-0.12, 0.75),
-                pos + vec2(-0.05, 0.15),
-                RED
-            );
-            draw_triangle(
-                pos + vec2( 0.0, 0.15),
-                pos + vec2( 0.12, 0.75),
-                pos + vec2( 0.05, 0.15),
-                RED
-            );
+            let (x, y, w, h) = Art::Bam.tex_coords();
+            draw_texture_ex(
+                *spritesheet,
+                pos.x() - w as f32 / 2.0,
+                pos.y() + h as f32,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(vec2(w as f32, -(h as f32))),
+                    source: Some(Rect {
+                        x: x as f32 * 204.0,
+                        y: y as f32 * 204.0,
+                        w: w as f32 * 204.0,
+                        h: h as f32 * 204.0,
+                    }),
+                    ..Default::default()
+                }
+            )
         });
 
         system!(ecs, _,
@@ -5064,25 +4828,24 @@ impl Drawer {
             for i in 0..3 {
                 let t = (tick + i * 12) as f32 / 10.0;
                 let pos = pos + vec2(t.cos() * 0.6 * dt, 1.0 + t.sin() * 0.225 * dt);
-                for v in circle_points(5).map(|v| Rot(tick as f32 / 25.0).apply(v)) {
-                    let (inner0, inner1, outer) = (
-                        v * 0.06 * dt,
-                        Rot(TAU / 5.0).apply(v) * 0.06 * dt,
-                        Rot(TAU / 10.0).apply(v) * 0.15 * dt,
-                    );
-                    draw_triangle(
-                        pos + inner0,
-                        pos + inner1,
-                        pos + outer,
-                        GOLD
-                    );
-                    draw_triangle(
-                        pos + inner0,
-                        pos + inner1,
-                        pos,
-                        GOLD
-                    );
-                }
+                let (x, y, w, h) = Art::Star.tex_coords();
+                draw_texture_ex(
+                    *spritesheet,
+                    pos.x() - w as f32 / 2.0 * dt,
+                    pos.y() + h as f32 / 2.0 * dt,
+                    WHITE,
+                    DrawTextureParams {
+                        dest_size: Some(dt * vec2(w as f32, -(h as f32))),
+                        source: Some(Rect {
+                            x: x as f32 * 204.0,
+                            y: y as f32 * 204.0,
+                            w: w as f32 * 204.0,
+                            h: h as f32 * 204.0,
+                        }),
+                        rotation: tick as f32 / 25.0,
+                        pivot: Some(pos),
+                    }
+                )
             }
         });
 
@@ -5130,7 +4893,7 @@ impl Drawer {
             rot  = Option<&Rot>
         {
             let mut color = BEIGE;
-            color.0[3] = 100;
+            color.0[3] = 2;
             let l = art.bounding() * rot.map(|_| 4.0).unwrap_or(2.0);
             let (x, y) = pos.into();
             draw_rectangle(x - l / 2.0, rot.map(|_| y - l / 2.0).unwrap_or(y), l, l, color);
