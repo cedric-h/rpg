@@ -371,7 +371,6 @@ dependencies = [
  "megaui-macroquad",
  "miniserde",
  "smallvec",
- "static_type_map",
 ]
 
 [[package]]
@@ -471,12 +470,6 @@ name = "spin"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
-
-[[package]]
-name = "static_type_map"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81c5a4447baaac31252594e1571cc261d8e174e40814486a4049efb0826ad708"
 
 [[package]]
 name = "stb_truetype"
