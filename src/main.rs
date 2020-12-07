@@ -6,7 +6,6 @@ use macroquad::prelude::*;
 #[allow(dead_code)]
 mod math;
 use smallvec::{smallvec, SmallVec};
-use static_type_map::StaticTypeMap;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use megaui_macroquad::{
@@ -138,10 +137,6 @@ impl Phys {
 
     fn iter(&self) -> impl Iterator<Item = &Circle> {
         self.0.iter().filter_map(|s| s.as_ref())
-    }
-
-    fn pushfoot_bighit(self) -> Self {
-        self.insert(Circle::push(0.2, vec2(0.0, 0.2))).insert(Circle::hit(0.4, vec2(0.0, 0.4)))
     }
 
     fn wings(self, r: f32, wr: f32, kind: CircleKind) -> Self {
@@ -1358,8 +1353,6 @@ impl Hero<'_> {
     }
 }
 
-const GOLDEN_RATIO: f32 = 1.618034;
-
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum Art {
     Hero,
@@ -1446,8 +1439,8 @@ impl Art {
             Art::Harp => (4, 0, 1, 1),
             Art::Xp => (5, 0, 1, 1),
             Art::Lockbox => (0, 1, 1, 1),
-            Art::Compass => (1, 1, 1, 1),
-            Art::Book => (2, 1, 1, 1),
+            Art::Compass => (2, 1, 1, 1),
+            Art::Book => (1, 1, 1, 1),
             Art::Chest => (3, 1, 2, 1),
             Art::Star => (5, 1, 1, 1),
             Art::Bam => (6, 1, 1, 1),
@@ -2636,7 +2629,7 @@ impl Waffle {
                 }
             }
 
-            if let Some(wep_ent) = game.weapon_ent(e) {
+            if let Ok(Some(wep_ent)) = game.weapon_ent(e) {
                 let (attacks, bullets) = game
                     .ecs
                     .query_one_mut::<Weapon>(wep_ent)
@@ -2698,7 +2691,7 @@ impl Waffle {
                 .map(|(e, (p, v, f, h))| (e, *p, *v, *f, *h)),
         );
         for (e, pos, vel, _, _) in enemies.drain(..) {
-            if let Some(wep_ent) = game.weapon_ent(e) {
+            if let Ok(Some(wep_ent)) = game.weapon_ent(e) {
                 if let Some(mut wep) = game.ecs.query_one_mut::<Weapon>(wep_ent).ok() {
                     wep.tick(WeaponInput {
                         start_attacking: None,
@@ -3103,10 +3096,29 @@ struct Surprised {
     duration: u32,
 }
 
+#[derive(miniserde::Serialize, miniserde::Deserialize, Debug)]
+struct MapCircleCollider {
+    pos: (f32, f32),
+    radius: f32,
+}
+
+#[derive(miniserde::Serialize, miniserde::Deserialize, Debug)]
+struct Map {
+    trees: Vec<(f32, f32)>,
+    brambles: Vec<(f32, f32)>,
+    rocky_enter: Vec<BezierPoint>,
+    rocky_hide: Vec<BezierPoint>,
+    rocky_bounce1: Vec<BezierPoint>,
+    rocky_bounce2: Vec<BezierPoint>,
+    rocky_leave: Vec<BezierPoint>,
+    melee_enter: Vec<BezierPoint>,
+    ranged_enter: Vec<BezierPoint>,
+    circles: Vec<MapCircleCollider>,
+}
+
 #[macroquad::main("rpg")]
 async fn main() {
     let mut ecs = hecs::World::new();
-    let mut pad = StaticTypeMap::with_capacity(100);
     let mut drawer = Drawer::new().await;
     let mut waffle = Waffle::new();
     let mut fireballs = Bullets::new();
@@ -3127,37 +3139,12 @@ async fn main() {
         Bag::default(),
     ));
 
-    #[derive(miniserde::Serialize, miniserde::Deserialize, Debug)]
-    struct MapCircleCollider {
-        pos: (f32, f32),
-        radius: f32,
-    }
-
-    #[derive(miniserde::Serialize, miniserde::Deserialize, Debug)]
-    struct Map {
-        trees: Vec<(f32, f32)>,
-        brambles: Vec<(f32, f32)>,
-        rocky_enter: Vec<BezierPoint>,
-        rocky_hide: Vec<BezierPoint>,
-        rocky_bounce1: Vec<BezierPoint>,
-        rocky_bounce2: Vec<BezierPoint>,
-        rocky_leave: Vec<BezierPoint>,
-        melee_enter: Vec<BezierPoint>,
-        ranged_enter: Vec<BezierPoint>,
-        circles: Vec<MapCircleCollider>,
-    }
     let map_json = String::from_utf8(load_file("./map.json").await.unwrap()).unwrap();
-    let gmap: Map = miniserde::json::from_str(&map_json).unwrap();
-    fn map(pad: &mut StaticTypeMap) -> Result<&Map, &'static str> {
-        pad.get().ok_or("who deleted the game map smh")
-    }
-    fn take_map(pad: &mut StaticTypeMap) -> Result<Map, &'static str> {
-        pad.remove().ok_or("who deleted the game map smh")
-    }
+    let map: Map = miniserde::json::from_str(&map_json).unwrap();
 
-    ecs.spawn((gmap.rocky_enter.last().map(|bp| bp.pos()).unwrap_or_default(), Art::Rock));
+    ecs.spawn((map.rocky_enter.last().map(|bp| bp.pos()).unwrap_or_default(), Art::Rock));
 
-    for &(x, y) in &gmap.trees {
+    for &(x, y) in &map.trees {
         ecs.spawn((vec2(x, y - 0.4), Art::Tree, ZOffset(-1.00)));
         ecs.spawn((vec2(x - 0.02, y - 0.4), Art::TreeOutline, ZOffset(-0.01)));
         ecs.spawn((vec2(x, y - 0.4), Art::TreeTrunk));
@@ -3165,626 +3152,17 @@ async fn main() {
         ecs.spawn((vec2(x, y - 1.0), Art::TreeShadow, ZOffset(1000.0)));
     }
 
-    for &MapCircleCollider { pos: (x, y), radius } in &gmap.circles {
+    for &MapCircleCollider { pos: (x, y), radius } in &map.circles {
         ecs.spawn((vec2(x, y - radius), Phys::new().pushbox(radius)));
     }
 
-    let big_log_pos = vec2(2.0, 5.0);
-    ecs.spawn((big_log_pos, Art::BigLog, Phys::new().wings(0.8, 0.8, CircleKind::Push)));
-
-    let rocky = ecs.reserve_entity();
-    let elmer = ecs.reserve_entity();
-    let elmer_enter = {
-        let mut path = gmap.rocky_enter.clone();
-        if let Some(p) = path.last_mut() {
-            p.pos.0 += 1.0;
-            p.pos.1 -= 1.0;
-        }
-        path
-    };
-    let elmer_leave = elmer_enter.clone();
-
-    pad.insert(gmap);
-
-    let mut tasks = vec![];
-
-    tasks.push(Task {
-        label: "Quick, hide!",
-        req: Box::new(move |g, _| Ok(g.hero_dist(big_log_pos + vec2(0.0, 1.6)) < 0.8)),
-        guide: Box::new(move |g, _, gi| {
-            if g.tick > 100 {
-                gi.push((Art::RedArrow, big_log_pos + vec2(0.0, 1.6)))
-            }
-            Ok(())
-        }),
-        on_finish: Box::new(move |g, pad| {
-            let Map { rocky_enter, .. } = map(pad)?;
-            g.ecs.insert(
-                rocky,
-                (
-                    Art::Rocky,
-                    rocky_enter[0].pos(),
-                    RunPath {
-                        smooth: false,
-                        path: rocky_enter.iter().copied().collect(),
-                        start_tick: g.tick,
-                        duration: 160,
-                    },
-                    Bag::holding(Item::sword(rocky)),
-                ),
-            )?;
-            g.camera_focus_ent = rocky;
-            g.hero_movement_locked = true;
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        label: "Watch out for that rock, Rocky",
-        req: Box::new(move |g, _| {
-            let (rocky_run_done, rocky_vel) = {
-                let run = g.ecs.get::<RunPath>(rocky)?;
-                (run.done(g.tick), run.vel(g.tick))
-            };
-            let rocky_pos = g.pos(rocky);
-            let wep_ent = g.weapon_ent(rocky);
-
-            let tick = g.tick;
-            if let Some(mut wep) = wep_ent.and_then(|e| g.ecs.query_one_mut::<Weapon>(e).ok()) {
-                wep.tick(WeaponInput {
-                    start_attacking: None,
-                    target: Vec2::zero(),
-                    wielder_pos: rocky_pos,
-                    wielder_vel: rocky_vel,
-                    wielder_dir: Direction::Left,
-                    speed_multiplier: 1.0,
-                    tick,
-                });
-            }
-            if let Some(e) = wep_ent.filter(|_| rocky_run_done) {
-                g.ecs.insert_one(e, Velocity::new(Vec2::one() * -0.1))?;
-            }
-            Ok(rocky_run_done)
-        }),
-        on_finish: Box::new(move |g, pad| {
-            g.ecs.insert_one(
-                rocky,
-                RunPath {
-                    path: map(pad)?.rocky_bounce1.iter().copied().collect(),
-                    smooth: false,
-                    start_tick: g.tick,
-                    duration: 65,
-                },
-            )?;
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        label: "Ouch, Rocky!",
-        req: Box::new(move |g, _| Ok(g.path_finished(rocky))),
-        on_finish: Box::new(move |g, pad| {
-            g.ecs.insert_one(
-                rocky,
-                RunPath {
-                    path: map(pad)?.rocky_bounce2.iter().copied().collect(),
-                    smooth: false,
-                    start_tick: g.tick,
-                    duration: 55,
-                },
-            )?;
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        label: "Ouch again, Rocky!",
-        req: Box::new(move |g, _| Ok(g.path_finished(rocky))),
-        on_finish: Box::new(move |g, pad| {
-            const HIDE_TIME: u32 = 100;
-            g.ecs.insert(
-                rocky,
-                (
-                    RunPath {
-                        path: map(pad)?.rocky_hide.iter().copied().collect(),
-                        start_tick: g.tick + 160,
-                        smooth: true,
-                        duration: HIDE_TIME,
-                    },
-                    Starstruck { start_tick: g.tick, duration: 140 },
-                    Surprised { start_tick: g.tick + 160 + HIDE_TIME, duration: 50 },
-                ),
-            )?;
-            g.speech.push((
-                Speaker::Rocky,
-                "Who the hell are you?      \nNevermind, he's almost here!".to_string(),
-                g.tick + 160 + HIDE_TIME,
-            ));
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        label: "Rocky, hide!",
-        req: Box::new(move |g, _| {
-            Ok(g.ecs.get::<RunPath>(rocky).map(|rp| rp.done(g.tick - 200))?)
-        }),
-        on_finish: Box::new(move |g, _| {
-            g.ecs.insert(
-                elmer,
-                (
-                    Art::Elmer,
-                    Health::full(10),
-                    Bag::holding(Item::sword(elmer)),
-                    Fighter::default(),
-                    elmer_enter[0].pos(),
-                    Velocity::default(),
-                    RunPath {
-                        smooth: true,
-                        path: elmer_enter.iter().copied().collect(),
-                        start_tick: g.tick,
-                        duration: 175,
-                    },
-                ),
-            )?;
-            g.camera_focus_ent = elmer;
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        label: "Let Elmer charge in",
-        req: Box::new(move |g, _| Ok(g.path_finished(elmer))),
-        on_finish: Box::new(move |g, _| {
-            g.speech.push((
-                Speaker::Elmer,
-                "Rocky's sword is here...      \nBut Rocky ain't!".to_string(),
-                g.tick + 50,
-            ));
-            g.speech.push((
-                Speaker::Elmer,
-                concat!(
-                    "The forest creatures must've gotten him!      \n",
-                    "Serves him right, he should've kept\n",
-                    "his hands off my sister!",
-                )
-                .to_string(),
-                g.tick + 290,
-            ));
-            g.speech.push((
-                Speaker::Elmer,
-                concat!(
-                    "What was that noise?                      \n",
-                    "Couldn't have been ...        \n",
-                    "forest creatures?"
-                )
-                .to_string(),
-                g.tick + 710,
-            ));
-            g.ecs.insert_one(elmer, Surprised { start_tick: g.tick + 950, duration: 100 })?;
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        label: "Wait for Elmer to get scared ...",
-        req: Box::new(move |g, _| {
-            Ok(g.ecs.get::<Surprised>(elmer).map(|rp| rp.start_tick + 50 < g.tick).unwrap_or(false))
-        }),
-        on_finish: Box::new(move |g, _| {
-            g.ecs.insert_one(
-                elmer,
-                RunPath {
-                    smooth: true,
-                    path: rev_bez(&elmer_leave),
-                    start_tick: g.tick,
-                    duration: 105,
-                },
-            )?;
-            g.camera_focus_ent = hero;
-            g.speech.push((
-                Speaker::Rocky,
-                concat!(
-                    "That liar!      \n",
-                    "I never touched his sister!\n",
-                    "Besides, she wanted to talk to me!"
-                )
-                .to_string(),
-                g.tick + 50,
-            ));
-            g.speech.push((
-                Speaker::Rocky,
-                concat!(
-                    "Whatever. We need to get out of here!       \n",
-                    "The forest creatures are no joke.",
-                )
-                .to_string(),
-                g.tick + 300,
-            ));
-            g.speech.push((
-                Speaker::Rocky,
-                concat!("You take my sword, I'm more of a lover\n", "than a fighter anyway.",)
-                    .to_string(),
-                g.tick + 600,
-            ));
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        label: "Let Rocky finish talking",
-        req: Box::new(move |g, _| {
-            Ok(g.speech.last().map(|(_, _, t)| t + 20 < g.tick).unwrap_or(true))
-        }),
-        on_finish: Box::new(move |g, pad| {
-            g.hero_movement_locked = false;
-            g.ecs.despawn(elmer)?;
-            g.ecs.insert_one(
-                rocky,
-                RunPath {
-                    smooth: true,
-                    path: rev_bez(&map(pad)?.rocky_hide),
-                    start_tick: g.tick,
-                    duration: 165,
-                },
-            )?;
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    struct Brambles {
-        plants: [hecs::Entity; 8],
-        pads: [hecs::Entity; 8],
-        start_tick: u32,
-    };
-    impl Brambles {
-        fn new(coords: &Vec<(f32, f32)>, Game { ecs, tick, .. }: &mut Game) -> Self {
-            let mut c = coords.into_iter().copied().cycle();
-            Self {
-                start_tick: *tick,
-                plants: [(); 8].map(|_| {
-                    ecs.spawn((
-                        Vec2::from(c.next().unwrap()) - vec2(0.0, 0.25),
-                        Art::Bramble,
-                        Phys::new().hitbox(0.3).pushbox_centered(0.6),
-                        Health::full(1),
-                    ))
-                }),
-                pads: [(); 8].map(|_| {
-                    ecs.spawn((
-                        Art::BrambleShadow,
-                        Vec2::from(c.next().unwrap()) - vec2(0.0, 0.4),
-                        ZOffset(999.0),
-                    ))
-                }),
-            }
-        }
-
-        fn update(&self, g: &mut Game) -> Result<(), hecs::NoSuchEntity> {
-            let tick = g.tick;
-
-            for (&plant, &pad) in self.plants.iter().zip(&self.pads) {
-                let scale = ((tick - self.start_tick) as f32 / 125.0).min(1.0);
-                let mut pad_color = DARKGREEN;
-                pad_color.0[1] -= 30;
-                pad_color.0[2] -= 30;
-                pad_color.0[3] = 100;
-                if !g.dead(plant) {
-                    let p = g.pos(plant);
-                    g.ecs.insert(pad, (p - vec2(0.0, scale / 4.0), Scale(vec2(1.0, 1.0) * scale)))?;
-                    g.ecs.insert_one(plant, Scale(vec2(1.0, scale)))?;
-                }
-            }
-            Ok(())
-        }
-
-        fn living<'a>(&'a self, ecs: &'a hecs::World) -> impl Iterator<Item = hecs::Entity> + 'a {
-            self.plants.iter().copied().filter(move |&e| ecs.contains(e))
-        }
-
-        fn dead<'a>(&'a self, ecs: &'a hecs::World) -> impl Iterator<Item = hecs::Entity> + 'a {
-            self.plants.iter().copied().filter(move |&e| !ecs.contains(e))
-        }
-    }
-
-    let melee = ecs.reserve_entity();
-    let ranged = ecs.reserve_entity();
-
-    tasks.push(Task {
-        label: "Take Rocky's Sword",
-        req: Box::new(move |g, _| {
-            Ok(g.weapon_ent(rocky).map(|e| g.hero_dist_ent(e) < 1.3).unwrap_or(false))
-        }),
-        guide: Box::new(move |g, _, gi| {
-            if let Some(e) = g.weapon_ent(rocky) {
-                gi.push((Art::RedArrow, g.pos(e) + vec2(-0.75, -0.5)))
-            }
-            Ok(())
-        }),
-        on_finish: Box::new(move |g, _| {
-            if let Some(ent) = g.weapon_ent(rocky) {
-                g.ecs.despawn(ent)?;
-            }
-            g.give_item(hero, Item::sword(hero))?;
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        req: Box::new(move |g, _| Ok(g.path_finished(rocky))),
-        on_finish: Box::new(move |g, pad| {
-            {
-                let map = take_map(pad)?;
-                let b = Brambles::new(&map.brambles, g);
-                pad.insert(b);
-                pad.insert(map);
-            }
-
-            let Map { melee_enter, ranged_enter, .. } = map(pad)?;
-            g.hero_movement_locked = true;
-            g.ecs.insert(
-                melee,
-                (
-                    Art::Goblin,
-                    Health::full(2),
-                    HealthBar,
-                    melee_enter[0].pos(),
-                    RunPath {
-                        smooth: true,
-                        path: melee_enter.iter().copied().collect(),
-                        start_tick: g.tick,
-                        duration: 175,
-                    },
-                    SpillXp(10),
-                    Fighter {
-                        chase_speed: 0.0045,
-                        charge_speed: 0.0065,
-                        chase_distance: 50.0,
-                        attack_interval: 60,
-                        ..Default::default()
-                    },
-                    Phys::new().insert(Circle::push(0.2, vec2(0.0, 0.1))).hitbox(0.3),
-                    Velocity::default(),
-                    Bag::holding(Item::sword(melee)),
-                ),
-            )?;
-
-            g.ecs.insert(
-                ranged,
-                (
-                    Art::Goblin,
-                    Health::full(2),
-                    HealthBar,
-                    ranged_enter[0].pos(),
-                    SpillXp(10),
-                    Fighter {
-                        behavior: FighterBehavior::Ranged,
-                        attack_interval: 150,
-                        ..Default::default()
-                    },
-                    Phys::new().insert(Circle::push(0.2, vec2(0.0, 0.1))).hitbox(0.3),
-                    Velocity::default(),
-                    RunPath {
-                        smooth: true,
-                        path: ranged_enter.iter().copied().collect(),
-                        start_tick: g.tick,
-                        duration: 175,
-                    },
-                    Bag::holding(Item::bow(ranged)),
-                ),
-            )?;
-
-            g.speech.push((Speaker::Rocky, "Wh... what the hell!?!".to_string(), g.tick + 75));
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        label: "Let the Brambles Grow",
-        req: Box::new(move |g, pad| {
-            Ok(if let Some(brambles) = pad.get::<Brambles>() {
-                brambles.update(g)?;
-                brambles.start_tick + 125 < g.tick
-            } else {
-                false
-            })
-        }),
-        on_finish: Box::new(move |g, _| {
-            g.camera_focus_ent = melee;
-            g.speech.push((Speaker::Rocky, "FOREST CREATURES!!!!".to_string(), g.tick + 30));
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        label: "Watch Rocky Hide, Again",
-        req: Box::new(move |g, _| {
-            Ok(g.speech.last().map(|(_, _, t)| t + 200 < g.tick).unwrap_or(true))
-        }),
-        on_finish: Box::new(move |g, pad| {
-            g.camera_focus_ent = rocky;
-            g.ecs.insert(
-                rocky,
-                (
-                    RunPath {
-                        path: map(pad)?.rocky_hide.iter().copied().collect(),
-                        start_tick: g.tick + 30,
-                        smooth: true,
-                        duration: 70,
-                    },
-                    Surprised { start_tick: g.tick, duration: 120 },
-                ),
-            )?;
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        label: "Break past the Brambles!",
-        req: Box::new(move |g, pad| {
-            if g.path_finished(rocky) {
-                g.camera_focus_ent = hero;
-                g.hero_movement_locked = false;
-            }
-            Ok(if let Some(brambles) = pad.get::<Brambles>() {
-                brambles.update(g)?;
-                brambles.dead(&g.ecs).count() > 0
-            } else {
-                false
-            })
-        }),
-        guide: Box::new(move |g, pad, gi| {
-            if let Some(brambles) = pad.get::<Brambles>() {
-                let f = brambles.plants[2];
-                if g.ecs.contains(f) {
-                    gi.push((Art::SwordPointer, g.pos(f) + vec2(0.0, 2.0)));
-                }
-            }
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    #[derive(Default, Debug)]
-    struct LastKnownRangedPos(Vec2);
-
-    tasks.push(Task {
-        label: "Kill the forest creatures!",
-        req: Box::new(move |g, pad| {
-            if !g.dead(ranged) {
-                pad.insert(LastKnownRangedPos(g.pos(ranged)));
-            };
-            Ok(g.dead(melee) && g.dead(ranged))
-        }),
-        on_finish: Box::new(move |g, pad| {
-            let bow_pos = pad.remove::<LastKnownRangedPos>().unwrap_or_default().0;
-            let rocky_pos = g.pos(rocky);
-
-            if let Some(brambles) = pad.remove::<Brambles>() {
-                for &plant in &brambles.plants {
-                    if !g.dead(plant) {
-                        g.hit(HitInput {
-                            hitter_pos: rocky_pos,
-                            hit: WeaponHit { hit: plant },
-                            crit_chance: 0.0,
-                            damage: 1,
-                            knockback: 0.0,
-                        });
-                    }
-                }
-            }
-
-            let mut bow_item = Item::bow(hero).as_weapon().unwrap();
-            bow_item.pos = bow_pos;
-            bow_item.rot.0 = FRAC_PI_2 + 0.1;
-            let bow = g.ecs.spawn(bow_item);
-
-            let Map { ranged_enter, rocky_hide, .. } = map(pad)?;
-            g.ecs.insert(
-                bow,
-                (
-                    PickUp::default(),
-                    Velocity::default(),
-                    RunPath {
-                        path: vec![BezierPoint::centered(bow_pos), {
-                            let mut p = ranged_enter.last().copied().unwrap_or_default();
-                            p.pos.0 -= 2.0;
-                            p.pos.1 += 1.0;
-                            p
-                        }],
-                        start_tick: g.tick,
-                        duration: 50,
-                        smooth: true,
-                    },
-                ),
-            )?;
-            g.ecs.insert_one(
-                rocky,
-                RunPath {
-                    path: rev_bez(rocky_hide),
-                    start_tick: g.tick + 250,
-                    smooth: true,
-                    duration: 150,
-                },
-            )?;
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        label: "Let Rocky start coming out of hiding",
-        req: Box::new(move |g, _| Ok(g.path_started(rocky))),
-        on_finish: Box::new(move |g, _| {
-            g.hero_movement_locked = true;
-            g.camera_focus_ent = rocky;
-            g.speech.push((
-                Speaker::Rocky,
-                concat!(
-                    "You just saved my life!     \n",
-                    "A proper thank you will have to wait, \n",
-                    "We need to get the hell out of dodge. \n",
-                )
-                .to_string(),
-                g.tick,
-            ));
-            g.speech.push((
-                Speaker::Rocky,
-                concat!(
-                    "I don't want to run into any more of those \n",
-                    "buggers. Maybe pick up that bow that they \n",
-                    "dropped, it looks pretty nifty.\n",
-                )
-                .to_string(),
-                g.tick + 450,
-            ));
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    tasks.push(Task {
-        label: "Let Rocky finish talking",
-        req: Box::new(move |g, _| {
-            Ok(g.speech.last().map(|(_, _, t)| t + 70 < g.tick).unwrap_or(true))
-        }),
-        on_finish: Box::new(move |g, pad| {
-            g.camera_focus_ent = hero;
-            g.hero_movement_locked = false;
-            g.camera_focus_ent = hero;
-            g.ecs.insert_one(
-                rocky,
-                RunPath {
-                    path: map(pad)?.rocky_leave.iter().copied().collect(),
-                    start_tick: g.tick + 20,
-                    smooth: false,
-                    duration: 1200,
-                },
-            )?;
-            Ok(())
-        }),
-        ..Default::default()
-    });
-
-    let mut quests = Quests::new(&mut ecs, pad);
+    let mut quests = Quests::new(&mut ecs);
     quests.add(Quest {
         title: "Rocky & The Forest Creatures",
         completion_quip: "Yes, all quest names should sound like band names.",
+        tale: Box::new(forest_start::ForestStart::new(forest_start::Data::new(map, &mut ecs))),
         completion: QuestCompletion::Accepted { on_tick: 0 },
-        tasks,
-        ..Default::default()
+        unlocks: vec![],
     });
 
     const STEP_EVERY: f64 = 1.0 / 60.0;
@@ -3909,6 +3287,7 @@ struct Game {
     hero_movement_locked: bool,
     hero_pos: Vec2,
     hero_mod: HeroMod,
+    hero: hecs::Entity,
     combo: Option<Combo>,
     /// Any stage of swinging
     hero_swinging: bool,
@@ -3922,14 +3301,15 @@ struct Game {
     tick: u32,
 }
 impl Game {
-    fn new(ecs: hecs::World, camera_focus_ent: hecs::Entity) -> Self {
+    fn new(ecs: hecs::World, hero: hecs::Entity) -> Self {
         Self {
             ecs,
             speech: Vec::with_capacity(10),
             hero_movement_locked: false,
             hero_pos: Vec2::zero(),
             hero_mod: HeroMod::empty(),
-            camera_focus_ent,
+            hero,
+            camera_focus_ent: hero,
             combo: None,
             hero_swinging: false,
             tick: 0,
@@ -3953,6 +3333,14 @@ impl Game {
         }
     }
 
+    fn last_speech_tick(&self) -> u32 {
+        self.speech.last().map(|(_, _, t)| *t).unwrap_or(0)
+    }
+
+    fn alive(&self, e: hecs::Entity) -> bool {
+        self.ecs.contains(e)
+    }
+
     fn dead(&self, e: hecs::Entity) -> bool {
         !self.ecs.contains(e)
     }
@@ -3961,8 +3349,8 @@ impl Game {
         (p - self.hero_pos).length()
     }
 
-    fn hero_dist_ent(&self, e: hecs::Entity) -> f32 {
-        self.ecs.get::<Vec2>(e).map(|p| (*p - self.hero_pos).length()).unwrap_or(f32::INFINITY)
+    fn hero_dist_ent(&self, e: hecs::Entity) -> Result<f32, Box<dyn std::error::Error>> {
+        Ok((*self.ecs.get::<Vec2>(e)? - self.hero_pos).length())
     }
 
     fn innocent_for(&mut self, e: hecs::Entity, duration: u32) -> Result<(), hecs::NoSuchEntity> {
@@ -3991,8 +3379,8 @@ impl Game {
         self.ecs.get::<Health>(e).map(|hp| hp.0).unwrap_or_default()
     }
 
-    fn weapon_ent(&mut self, e: hecs::Entity) -> Option<hecs::Entity> {
-        self.ecs.get_mut::<Bag>(e).ok().and_then(|mut b| b.weapon.as_mut().and_then(|w| w.out()))
+    fn weapon_ent(&mut self, e: hecs::Entity) -> Result<Option<hecs::Entity>, Box<dyn std::error::Error>> {
+        Ok(self.ecs.get_mut::<Bag>(e)?.weapon.as_mut().ok_or("bag no weapon")?.out())
     }
 
     /// The tuple's first field is true if they died,
@@ -4078,57 +3466,656 @@ struct HitInput {
     knockback: f32,
 }
 
-struct Task {
-    label: &'static str,
-    req: Box<dyn FnMut(&mut Game, &mut StaticTypeMap) -> Result<bool, Box<dyn std::error::Error>>>,
-    guide: Box<
-        dyn FnMut(
-            &mut Game,
-            &mut StaticTypeMap,
-            &mut Vec<(Art, Vec2)>,
-        ) -> Result<(), Box<dyn std::error::Error>>,
-    >,
-    on_finish:
-        Box<dyn FnMut(&mut Game, &mut StaticTypeMap) -> Result<(), Box<dyn std::error::Error>>>,
-    finished: bool,
+trait Tale {
+    fn tick(
+        &mut self,
+        g: &mut Game,
+        gi: &mut Vec<(Art, Vec2)>,
+    ) -> Result<bool, Box<dyn std::error::Error>>;
 }
-impl Default for Task {
-    fn default() -> Self {
-        Self {
-            label: "",
-            req: Box::new(|_, _| Ok(true)),
-            on_finish: Box::new(|_, _| Ok(())),
-            guide: Box::new(|_, _, _| Ok(())),
-            finished: false,
+
+macro_rules! tale_stages {
+    (   $mod:ident, $stage:ident;
+        $data:ident { $( $data_def:tt )* }
+        ($g:ident, $gi:ident, $data_v:ident)
+        { $($tail:tt)* }
+        $( stage $name:ident $logic:block )*
+    ) => { mod $mod {
+        use super::*;
+
+        $( $data_def )*
+
+        #[derive(Copy, Clone, PartialEq)]
+        enum Stage {
+            $( $name, )*
         }
-    }
-}
-impl Task {
-    fn done(&mut self, g: &mut Game, pad: &mut StaticTypeMap) -> bool {
-        let Self { finished, req, .. } = self;
-        if !*finished {
-            *finished = match (*req)(g, pad) {
-                Ok(b) => b,
-                Err(e) => {
-                    error!("Error evaluating `req` for Task {:?}: {}", self.label, e);
+        const ALL_STAGES: &[Stage] = &[
+            $( Stage::$name, )*
+        ];
+        
+        impl Stage {
+            fn first() -> Self {
+                ALL_STAGES[0]
+            }
+            
+            fn next(&mut self) -> bool {
+                let i = ALL_STAGES.iter().position(|s| *s == *self);
+                if let Some(s) = i.and_then(|p| ALL_STAGES.get(p + 1)) {
+                    *self = *s;
+                    true
+                } else {
                     false
                 }
-            };
-            if *finished {
-                if let Err(e) = (self.on_finish)(g, pad) {
-                    error!("Error evaluating `on_finish` for Task {:?}: {}", self.label, e);
+            }
+            
+            fn tick(
+                &mut self,
+                $g: &mut Game,
+                $gi: &mut Vec<(Art, Vec2)>,
+                $data_v: &mut Data,
+            ) -> Result<bool, Box<dyn std::error::Error>> {
+                $( $tail )*
+                match *self {
+                    $( Stage::$name => {
+                        $logic;
+                        Ok(true)
+                    } )*
                 }
             }
         }
-        *finished
+
+        pub struct $stage {
+            data: Data,
+            stage: Stage,
+        }
+
+        impl $stage {
+            pub(super) fn new(data: Data) -> Self {
+                Self {
+                    data,
+                    stage: Stage::first(),
+                }
+            }
+        }
+
+        impl Tale for $stage {
+            fn tick(
+                &mut self,
+                g: &mut Game,
+                gi: &mut Vec<(Art, Vec2)>,
+            ) -> Result<bool, Box<dyn std::error::Error>> {
+                let Self { stage, data } = self;
+                if stage.tick(g, gi, data)? {
+                    if !stage.next() {
+                        return Ok(true)
+                    }
+                }
+
+                Ok(false)
+            }
+        }
+    } }
+}
+
+tale_stages! {
+    forest_start, ForestStart;
+    Data {
+        struct Brambles {
+            plants: [hecs::Entity; 8],
+            pads: [hecs::Entity; 8],
+            start_tick: u32,
+        }
+        impl Brambles {
+            fn new(coords: &Vec<(f32, f32)>, Game { ecs, tick, .. }: &mut Game) -> Self {
+                let mut c = coords.into_iter().copied().cycle();
+                Self {
+                    start_tick: *tick,
+                    plants: [(); 8].map(|_| {
+                        ecs.spawn((
+                            Vec2::from(c.next().unwrap()) - vec2(0.0, 0.25),
+                            Art::Bramble,
+                            Phys::new().hitbox(0.3).pushbox_centered(0.6),
+                            Health::full(1),
+                        ))
+                    }),
+                    pads: [(); 8].map(|_| {
+                        ecs.spawn((
+                            Art::BrambleShadow,
+                            Vec2::from(c.next().unwrap()) - vec2(0.0, 0.4),
+                            ZOffset(999.0),
+                        ))
+                    }),
+                }
+            }
+
+            fn update(&self, g: &mut Game) -> Result<(), hecs::NoSuchEntity> {
+                let tick = g.tick;
+
+                for (&plant, &pad) in self.plants.iter().zip(&self.pads) {
+                    let scale = ((tick - self.start_tick) as f32 / 125.0).min(1.0);
+                    let mut pad_color = DARKGREEN;
+                    pad_color.0[1] -= 30;
+                    pad_color.0[2] -= 30;
+                    pad_color.0[3] = 100;
+                    if !g.dead(plant) {
+                        let p = g.pos(plant);
+                        g.ecs.insert(pad, (p - vec2(0.0, scale / 4.0), Scale(vec2(1.0, 1.0) * scale)))?;
+                        g.ecs.insert_one(plant, Scale(vec2(1.0, scale)))?;
+                    }
+                }
+                Ok(())
+            }
+
+            fn dead<'a>(&'a self, ecs: &'a hecs::World) -> impl Iterator<Item = hecs::Entity> + 'a {
+                self.plants.iter().copied().filter(move |&e| !ecs.contains(e))
+            }
+        }
+
+        pub(super) struct Data {
+            map: Map,
+            rocky: hecs::Entity,
+            elmer: hecs::Entity,
+            melee: hecs::Entity,
+            ranged: hecs::Entity,
+            elmer_enter: Vec<BezierPoint>,
+            big_log_pos: Vec2,
+            brambles: Option<Brambles>,
+            last_known_ranged_pos: Vec2,
+        }
+        impl Data {
+            pub(super) fn new(map: Map, ecs: &mut hecs::World) -> Self {
+                let big_log_pos = vec2(2.0, 5.0);
+                ecs.spawn((big_log_pos, Art::BigLog, Phys::new().wings(0.8, 0.8, CircleKind::Push)));
+
+                let elmer_enter = {
+                    let mut path = map.rocky_enter.clone();
+                    if let Some(p) = path.last_mut() {
+                        p.pos.0 += 1.0;
+                        p.pos.1 -= 1.0;
+                    }
+                    path
+                };
+
+                Self {
+                    rocky: ecs.reserve_entity(),
+                    elmer: ecs.reserve_entity(),
+                    melee: ecs.reserve_entity(),
+                    ranged: ecs.reserve_entity(),
+                    last_known_ranged_pos: Vec2::zero(),
+                    map,
+                    elmer_enter,
+                    big_log_pos,
+                    brambles: None
+                }
+            }
+        }
+
+    }
+    (g, gi, data)
+    {
+        let &mut Data {
+            rocky, elmer, big_log_pos,
+            melee, ranged, ref mut last_known_ranged_pos,
+            ref elmer_enter, ref map, ref mut brambles
+        } = data;
+    }
+
+    stage HideBehindLog {
+        if g.tick > 100 {
+            gi.push((Art::RedArrow, big_log_pos + vec2(0.0, 1.6)))
+        }
+        if g.hero_dist(big_log_pos + vec2(0.0, 1.6)) > 0.8 {
+            return Ok(false);
+        }
+
+        let Map { rocky_enter, .. } = map;
+        g.ecs.insert(
+            rocky,
+            (
+                Art::Rocky,
+                rocky_enter[0].pos(),
+                RunPath {
+                    smooth: false,
+                    path: rocky_enter.iter().copied().collect(),
+                    start_tick: g.tick,
+                    duration: 160,
+                },
+                Bag::holding(Item::sword(rocky)),
+            ),
+        )?;
+        g.camera_focus_ent = rocky;
+        g.hero_movement_locked = true;
+    }
+
+    stage RockyCharge {
+        let (rocky_run_done, rocky_vel) = {
+            let run = g.ecs.get::<RunPath>(rocky)?;
+            (run.done(g.tick), run.vel(g.tick))
+        };
+        let rocky_pos = g.pos(rocky);
+        let wep_ent = g.weapon_ent(rocky)?;
+
+        let tick = g.tick;
+        if let Some(mut wep) = wep_ent.and_then(|e| g.ecs.query_one_mut::<Weapon>(e).ok()) {
+            wep.tick(WeaponInput {
+                start_attacking: None,
+                target: Vec2::zero(),
+                wielder_pos: rocky_pos,
+                wielder_vel: rocky_vel,
+                wielder_dir: Direction::Left,
+                speed_multiplier: 1.0,
+                tick,
+            });
+        }
+        if let Some(e) = wep_ent.filter(|_| rocky_run_done) {
+            g.ecs.insert_one(e, Velocity::new(Vec2::one() * -0.1))?;
+        }
+        if !rocky_run_done {
+            return Ok(false);
+        }
+
+        g.ecs.insert_one(
+            rocky,
+            RunPath {
+                path: map.rocky_bounce1.iter().copied().collect(),
+                smooth: false,
+                start_tick: g.tick,
+                duration: 65,
+            },
+        )?;
+    }
+
+    stage RockyBounce1 {
+        if !g.path_finished(rocky) {
+            return Ok(false);
+        }
+
+        g.ecs.insert_one(
+            rocky,
+            RunPath {
+                path: map.rocky_bounce2.iter().copied().collect(),
+                smooth: false,
+                start_tick: g.tick,
+                duration: 55,
+            },
+        )?;
+    }
+
+    stage RockyBounce2 {
+        if !g.path_finished(rocky) {
+            return Ok(false);
+        }
+
+        const HIDE_TIME: u32 = 100;
+        g.ecs.insert(
+            rocky,
+            (
+                RunPath {
+                    path: map.rocky_hide.iter().copied().collect(),
+                    start_tick: g.tick + 160,
+                    smooth: true,
+                    duration: HIDE_TIME,
+                },
+                Starstruck { start_tick: g.tick, duration: 140 },
+                Surprised { start_tick: g.tick + 160 + HIDE_TIME, duration: 50 },
+            ),
+        )?;
+        g.speech.push((
+            Speaker::Rocky,
+            "Who the hell are you?      \nNevermind, he's almost here!".to_string(),
+            g.tick + 160 + HIDE_TIME,
+        ));
+    }
+
+    stage RockyHide {
+        if !g.ecs.get::<RunPath>(rocky)?.done(g.tick - 200) {
+            return Ok(false);
+        }
+
+        g.ecs.insert(
+            elmer,
+            (
+                Art::Elmer,
+                Health::full(10),
+                Bag::holding(Item::sword(elmer)),
+                Fighter::default(),
+                elmer_enter[0].pos(),
+                Velocity::default(),
+                RunPath {
+                    smooth: true,
+                    path: elmer_enter.iter().copied().collect(),
+                    start_tick: g.tick,
+                    duration: 175,
+                },
+            ),
+        )?;
+        g.camera_focus_ent = elmer;
+    }
+
+    stage ElmerCharge {
+        if !g.path_finished(elmer) {
+            return Ok(false)
+        }
+
+        g.speech.push((
+            Speaker::Elmer,
+            "Rocky's sword is here...      \nBut Rocky ain't!".to_string(),
+            g.tick + 50,
+        ));
+        g.speech.push((
+            Speaker::Elmer,
+            concat!(
+                "The forest creatures must've gotten him!      \n",
+                "Serves him right, he should've kept\n",
+                "his hands off my sister!",
+            )
+            .to_string(),
+            g.tick + 290,
+        ));
+        g.speech.push((
+            Speaker::Elmer,
+            concat!(
+                "What was that noise?                      \n",
+                "Couldn't have been ...        \n",
+                "forest creatures?"
+            )
+            .to_string(),
+            g.tick + 710,
+        ));
+        g.ecs.insert_one(elmer, Surprised { start_tick: g.tick + 950, duration: 100 })?;
+    }
+
+    stage ElmerScared {
+        if g.ecs.get::<Surprised>(elmer)?.start_tick + 50 > g.tick {
+            return Ok(false)
+        }
+
+        g.ecs.insert_one(
+            elmer,
+            RunPath {
+                smooth: true,
+                path: rev_bez(&elmer_enter),
+                start_tick: g.tick,
+                duration: 105,
+            },
+        )?;
+        g.camera_focus_ent = g.hero;
+        g.speech.push((
+            Speaker::Rocky,
+            concat!(
+                "That liar!      \n",
+                "I never touched his sister!\n",
+                "Besides, she wanted to talk to me!"
+            )
+            .to_string(),
+            g.tick + 50,
+        ));
+        g.speech.push((
+            Speaker::Rocky,
+            concat!(
+                "Whatever. We need to get out of here!       \n",
+                "The forest creatures are no joke.",
+            )
+            .to_string(),
+            g.tick + 300,
+        ));
+        g.speech.push((
+            Speaker::Rocky,
+            concat!("You take my sword, I'm more of a lover\n", "than a fighter anyway.",)
+                .to_string(),
+            g.tick + 600,
+        ));
+    }
+
+    stage RockyElmerDefend {
+        if g.last_speech_tick() + 20 > g.tick {
+            return Ok(false)
+        }
+        g.hero_movement_locked = false;
+        g.ecs.despawn(elmer)?;
+        g.ecs.insert_one(
+            rocky,
+            RunPath {
+                smooth: true,
+                path: rev_bez(&map.rocky_hide),
+                start_tick: g.tick,
+                duration: 165,
+            },
+        )?;
+    }
+
+    stage TakeRockySword {
+        if let Some(rocky_wep) = g.weapon_ent(rocky)? {
+            gi.push((Art::RedArrow, g.pos(rocky_wep) + vec2(-0.75, -0.5)));
+            if g.hero_dist_ent(rocky_wep)? > 1.3 {
+                return Ok(false)
+            }
+            g.ecs.despawn(rocky_wep)?;
+            g.give_item(g.hero, Item::sword(g.hero))?;
+        }
+    }
+
+    stage BrambleSpawn {
+        if !g.path_finished(rocky) {
+            return Ok(false)
+        }
+        *brambles = Some(Brambles::new(&map.brambles, g));
+
+        let Map { melee_enter, ranged_enter, .. } = map;
+        g.hero_movement_locked = true;
+        g.ecs.insert(
+            melee,
+            (
+                Art::Goblin,
+                Health::full(2),
+                HealthBar,
+                melee_enter[0].pos(),
+                RunPath {
+                    smooth: true,
+                    path: melee_enter.iter().copied().collect(),
+                    start_tick: g.tick,
+                    duration: 175,
+                },
+                SpillXp(10),
+                Fighter {
+                    chase_speed: 0.0045,
+                    charge_speed: 0.0065,
+                    chase_distance: 50.0,
+                    attack_interval: 60,
+                    ..Default::default()
+                },
+                Phys::new().insert(Circle::push(0.2, vec2(0.0, 0.1))).hitbox(0.3),
+                Velocity::default(),
+                Bag::holding(Item::sword(melee)),
+            ),
+        )?;
+
+        g.ecs.insert(
+            ranged,
+            (
+                Art::Goblin,
+                Health::full(2),
+                HealthBar,
+                ranged_enter[0].pos(),
+                SpillXp(10),
+                Fighter {
+                    behavior: FighterBehavior::Ranged,
+                    attack_interval: 150,
+                    ..Default::default()
+                },
+                Phys::new().insert(Circle::push(0.2, vec2(0.0, 0.1))).hitbox(0.3),
+                Velocity::default(),
+                RunPath {
+                    smooth: true,
+                    path: ranged_enter.iter().copied().collect(),
+                    start_tick: g.tick,
+                    duration: 175,
+                },
+                Bag::holding(Item::bow(ranged)),
+            ),
+        )?;
+
+        g.speech.push((Speaker::Rocky, "Wh... what the hell!?!".to_string(), g.tick + 75));
+    }
+
+    stage BrambleGrow {
+        if let Some(brambles) = brambles {
+            brambles.update(g)?;
+            if brambles.start_tick + 125 < g.tick {
+                g.camera_focus_ent = melee;
+                g.speech.push((Speaker::Rocky, "FOREST CREATURES!!!!".to_string(), g.tick + 30));
+            } else {
+                return Ok(false)
+            }
+        }
+    }
+
+    stage RockyHideAgain {
+        if g.last_speech_tick() + 200 > g.tick {
+            return Ok(false)
+        }
+        g.camera_focus_ent = rocky;
+        g.ecs.insert(
+            rocky,
+            (
+                RunPath {
+                    path: map.rocky_hide.iter().copied().collect(),
+                    start_tick: g.tick + 30,
+                    smooth: true,
+                    duration: 70,
+                },
+                Surprised { start_tick: g.tick, duration: 120 },
+            ),
+        )?;
+    }
+
+    stage BreakBrambles {
+        if g.path_finished(rocky) {
+            g.camera_focus_ent = g.hero;
+            g.hero_movement_locked = false;
+        }
+        if let Some(brambles) = brambles {
+            let f = brambles.plants[2];
+            if g.ecs.contains(f) {
+                gi.push((Art::SwordPointer, g.pos(f) + vec2(0.0, 2.0)));
+            }
+            brambles.update(g)?;
+            if brambles.dead(&g.ecs).count() == 0 {
+                return Ok(false)
+            }
+        }
+    }
+
+    stage KillForestCreatures {
+        if !g.dead(ranged) {
+            *last_known_ranged_pos = g.pos(ranged);
+        }
+        if !g.dead(melee) || !g.dead(ranged) {
+            return Ok(false)
+        }
+        let bow_pos = *last_known_ranged_pos;
+        let rocky_pos = g.pos(rocky);
+
+        if let Some(brambles) = brambles {
+            for &plant in &brambles.plants {
+                if !g.dead(plant) {
+                    g.hit(HitInput {
+                        hitter_pos: rocky_pos,
+                        hit: WeaponHit { hit: plant },
+                        crit_chance: 0.0,
+                        damage: 1,
+                        knockback: 0.0,
+                    });
+                }
+            }
+        }
+
+        let mut bow_item = Item::bow(g.hero).as_weapon().unwrap();
+        bow_item.pos = bow_pos;
+        bow_item.rot.0 = FRAC_PI_2 + 0.1;
+        let bow = g.ecs.spawn(bow_item);
+
+        let Map { ranged_enter, rocky_hide, .. } = map;
+        g.ecs.insert(
+            bow,
+            (
+                PickUp::default(),
+                Velocity::default(),
+                RunPath {
+                    path: vec![BezierPoint::centered(bow_pos), {
+                        let mut p = ranged_enter.last().copied().unwrap_or_default();
+                        p.pos.0 -= 2.0;
+                        p.pos.1 += 1.0;
+                        p
+                    }],
+                    start_tick: g.tick,
+                    duration: 50,
+                    smooth: true,
+                },
+            ),
+        )?;
+        g.ecs.insert_one(
+            rocky,
+            RunPath {
+                path: rev_bez(rocky_hide),
+                start_tick: g.tick + 250,
+                smooth: true,
+                duration: 150,
+            },
+        )?;
+    }
+
+    stage RockyUnhide {
+        if !g.path_started(rocky) {
+            return Ok(false)
+        }
+        g.hero_movement_locked = true;
+        g.camera_focus_ent = rocky;
+        g.speech.push((
+            Speaker::Rocky,
+            concat!(
+                "You just saved my life!     \n",
+                "A proper thank you will have to wait, \n",
+                "We need to get the hell out of dodge. \n",
+            )
+            .to_string(),
+            g.tick,
+        ));
+        g.speech.push((
+            Speaker::Rocky,
+            concat!(
+                "I don't want to run into any more of those \n",
+                "buggers. Maybe pick up that bow that they \n",
+                "dropped, it looks pretty nifty.\n",
+            )
+            .to_string(),
+            g.tick + 450,
+        ));
+    }
+
+    stage RockyAskLeave {
+        if g.last_speech_tick() + 70 > g.tick {
+            return Ok(false)
+        }
+
+        g.camera_focus_ent = g.hero;
+        g.hero_movement_locked = false;
+        g.ecs.insert_one(
+            rocky,
+            RunPath {
+                path: map.rocky_leave.iter().copied().collect(),
+                start_tick: g.tick + 20,
+                smooth: false,
+                duration: 1200,
+            },
+        )?;
     }
 }
 
-#[derive(Default)]
 struct Quest {
     title: &'static str,
     completion_quip: &'static str,
-    tasks: Vec<Task>,
+    tale: Box<dyn Tale>,
     unlocks: Vec<usize>,
     completion: QuestCompletion,
 }
@@ -4228,7 +4215,6 @@ pub fn open_tree<F: FnOnce(&mut megaui::Ui)>(
 
 struct Quests {
     quests: QuestVec,
-    pad: StaticTypeMap,
     temp: Vec<usize>,
     tab_titles: [String; 3],
     new_tabs: [bool; 3],
@@ -4239,10 +4225,9 @@ struct Quests {
     icon_ent: hecs::Entity,
 }
 impl Quests {
-    fn new(ecs: &mut hecs::World, pad: StaticTypeMap) -> Self {
+    fn new(ecs: &mut hecs::World) -> Self {
         Self {
             quests: QuestVec(Vec::with_capacity(100)),
-            pad,
             temp: Vec::with_capacity(100),
             tab_titles: [(); 3].map(|_| String::with_capacity(25)),
             new_tabs: [false; 3],
@@ -4261,23 +4246,21 @@ impl Quests {
     }
 
     fn update(&mut self, g: &mut Game) {
-        let Self { quests, guides, pad, jump_to_tab, temp, new_tabs, .. } = self;
+        let Self { quests, guides, jump_to_tab, temp, new_tabs, .. } = self;
 
         guides.drain(..);
         for (_, _, quest) in quests.accepted_mut() {
-            if let Some(task) =
-                quest.tasks.iter_mut().find_map(|t| if !t.done(g, pad) { Some(t) } else { None })
-            {
-                if let Err(e) = (task.guide)(g, pad, guides) {
-                    error!("Error evaluating `guide` for Task {:?}: {}", task.label, e);
-                }
-            } else {
-                quest.completion.finish(g.tick);
-                *jump_to_tab = Some(2);
-                if !self.window_open {
-                    new_tabs[2] = true;
-                }
-                temp.extend(quest.unlocks.iter().copied());
+            match quest.tale.tick(g, guides) {
+                Err(e) => error!("Error evaluating `guide` for Quest {:?}: {}", quest.title, e),
+                Ok(true) => {
+                    quest.completion.finish(g.tick);
+                    *jump_to_tab = Some(2);
+                    if !self.window_open {
+                        new_tabs[2] = true;
+                    }
+                    temp.extend(quest.unlocks.iter().copied());
+                },
+                Ok(false) => {},
             }
         }
 
@@ -4352,14 +4335,7 @@ impl Quests {
     fn accepted_ui(&mut self, ui: &mut megaui::Ui) {
         ui.separator();
         for (_, i, quest) in self.quests.accepted() {
-            open_tree(ui, hash!(i), quest.title, |ui| {
-                for task in &quest.tasks {
-                    ui.label(None, &task.label);
-                    if !task.finished {
-                        return;
-                    }
-                }
-            });
+            open_tree(ui, hash!(i), quest.title, |_| {});
             ui.separator();
         }
     }
